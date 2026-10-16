@@ -275,3 +275,325 @@ describe('JSON envelope structure', () => {
     expect(parsed.data.protocolVersion).toBe(21);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Audit result shapes (ISSUE-095 / 096 / 097 / 098)
+// ---------------------------------------------------------------------------
+
+describe('account snapshot consistency audit JSON shape', () => {
+  const auditResult = {
+    snapshots: [
+      { id: 'snap-a', accountId: 'GAAA', ledgerSequence: 100, ledgerHash: 'aaaa', retrievedAt: '2024-01-01T00:00:00Z' },
+      { id: 'snap-b', accountId: 'GAAA', ledgerSequence: 100, ledgerHash: 'aaaa', retrievedAt: '2024-01-01T00:05:00Z' },
+    ],
+    comparisonContext: {
+      status: 'same-ledger',
+      ledgerSequence: 100,
+      ledgerHash: 'aaaa',
+      metadataAvailable: true,
+    },
+    fieldDifferences: [
+      { field: 'sequenceNumber', values: [{ snapshotId: 'snap-a', value: '1' }, { snapshotId: 'snap-b', value: '1' }], changed: false },
+    ],
+    consistencyFindings: [
+      { severity: 'info', code: 'MATCHING_SNAPSHOTS', message: 'Snapshots agree on shared ledger state' },
+    ],
+    limitations: [],
+  };
+
+  it('serializes snapshot identifiers, context, differences, and findings', async () => {
+    const out = await captureStdout(() => outputJson(auditResult));
+    const parsed = JSON.parse(out);
+    expect(parsed.ok).toBe(true);
+    expect(parsed.data.snapshots).toHaveLength(2);
+    expect(parsed.data.snapshots[0].id).toBe('snap-a');
+    expect(parsed.data.comparisonContext.status).toBe('same-ledger');
+    expect(parsed.data.fieldDifferences[0].field).toBe('sequenceNumber');
+    expect(parsed.data.consistencyFindings[0].code).toBe('MATCHING_SNAPSHOTS');
+  });
+
+  it('preserves original values and their snapshot sources', async () => {
+    const out = await captureStdout(() => outputJson(auditResult));
+    const parsed = JSON.parse(out);
+    const diff = parsed.data.fieldDifferences[0];
+    expect(diff.values[0].snapshotId).toBe('snap-a');
+    expect(diff.values[0].value).toBe('1');
+    expect(diff.values[1].snapshotId).toBe('snap-b');
+  });
+
+  it('reports differing ledger context without claiming corruption', async () => {
+    const differing = {
+      ...auditResult,
+      comparisonContext: { status: 'different-ledgers', ledgerSequence: null, ledgerHash: null, metadataAvailable: true },
+      consistencyFindings: [
+        { severity: 'info', code: 'DIFFERENT_LEDGER_STATES', message: 'Snapshots captured at different ledgers' },
+      ],
+    };
+    const out = await captureStdout(() => outputJson(differing));
+    const parsed = JSON.parse(out);
+    expect(parsed.data.comparisonContext.status).toBe('different-ledgers');
+    expect(parsed.data.consistencyFindings[0].code).toBe('DIFFERENT_LEDGER_STATES');
+    expect(JSON.stringify(parsed.data)).not.toMatch(/corrupt/i);
+  });
+
+  it('reports missing ledger metadata as a limitation', async () => {
+    const missing = {
+      ...auditResult,
+      comparisonContext: { status: 'unavailable', ledgerSequence: null, ledgerHash: null, metadataAvailable: false },
+      limitations: ['Ledger metadata unavailable; consistency cannot be established'],
+    };
+    const out = await captureStdout(() => outputJson(missing));
+    const parsed = JSON.parse(out);
+    expect(parsed.data.comparisonContext.metadataAvailable).toBe(false);
+    expect(parsed.data.limitations).toHaveLength(1);
+  });
+
+  it('marks incompatible account or network metadata as incomparable', async () => {
+    const incomparable = {
+      snapshots: [
+        { id: 'snap-a', accountId: 'GAAA', network: 'mainnet' },
+        { id: 'snap-b', accountId: 'GBBB', network: 'testnet' },
+      ],
+      comparisonContext: { status: 'incomparable', reason: 'account-mismatch' },
+      fieldDifferences: [],
+      consistencyFindings: [
+        { severity: 'error', code: 'INCOMPARABLE_SNAPSHOTS', message: 'Snapshots refer to different accounts' },
+      ],
+      limitations: [],
+    };
+    const out = await captureStdout(() => outputJson(incomparable));
+    const parsed = JSON.parse(out);
+    expect(parsed.data.comparisonContext.status).toBe('incomparable');
+    expect(parsed.data.consistencyFindings[0].code).toBe('INCOMPARABLE_SNAPSHOTS');
+  });
+});
+
+describe('payment reference audit JSON shape', () => {
+  const referenceResult = {
+    reference: { type: 'transaction-hash', value: 'abc123' },
+    constraints: { destination: 'GDEST', asset: { code: 'USD', issuer: 'GISSUER' }, amount: '10.0000000', window: null },
+    matchedRecords: [
+      { transactionHash: 'abc123', ledgerSequence: 42, status: 'success', operations: [{ type: 'payment', amount: '10.0000000' }] },
+    ],
+    ambiguity: { status: 'unique', candidateCount: 1 },
+    retrievalLimitations: [],
+  };
+
+  it('serializes reference type, constraints, matches, ambiguity, and limitations', async () => {
+    const out = await captureStdout(() => outputJson(referenceResult));
+    const parsed = JSON.parse(out);
+    expect(parsed.data.reference.type).toBe('transaction-hash');
+    expect(parsed.data.constraints.asset.issuer).toBe('GISSUER');
+    expect(parsed.data.matchedRecords[0].transactionHash).toBe('abc123');
+    expect(parsed.data.ambiguity.status).toBe('unique');
+    expect(parsed.data.retrievalLimitations).toEqual([]);
+  });
+
+  it('reports ambiguous references without selecting an arbitrary result', async () => {
+    const ambiguous = {
+      ...referenceResult,
+      reference: { type: 'memo', value: 'order-42' },
+      matchedRecords: [
+        { transactionHash: 'aaa', ledgerSequence: 1 },
+        { transactionHash: 'bbb', ledgerSequence: 2 },
+      ],
+      ambiguity: { status: 'ambiguous', candidateCount: 2 },
+    };
+    const out = await captureStdout(() => outputJson(ambiguous));
+    const parsed = JSON.parse(out);
+    expect(parsed.data.ambiguity.status).toBe('ambiguous');
+    expect(parsed.data.matchedRecords).toHaveLength(2);
+  });
+
+  it('discloses incomplete search coverage as a retrieval limitation', async () => {
+    const incomplete = {
+      ...referenceResult,
+      matchedRecords: [],
+      ambiguity: { status: 'none', candidateCount: 0 },
+      retrievalLimitations: ['Pagination stopped early; historical records may be missing'],
+    };
+    const out = await captureStdout(() => outputJson(incomplete));
+    const parsed = JSON.parse(out);
+    expect(parsed.data.retrievalLimitations).toHaveLength(1);
+    expect(parsed.data.matchedRecords).toEqual([]);
+  });
+
+  it('preserves exact amount precision in constraints and matches', async () => {
+    const out = await captureStdout(() => outputJson(referenceResult));
+    const parsed = JSON.parse(out);
+    expect(parsed.data.constraints.amount).toBe('10.0000000');
+    expect(parsed.data.matchedRecords[0].operations[0].amount).toBe('10.0000000');
+  });
+});
+
+describe('Soroban event query validation JSON shape', () => {
+  const queryResult = {
+    validationStatus: 'valid',
+    fieldFindings: [
+      { path: 'contractIds[0]', severity: 'info', message: 'Contract identifier is well-formed' },
+    ],
+    endpointCompatibility: null,
+  };
+
+  it('serializes validation status and field-level findings', async () => {
+    const out = await captureStdout(() => outputJson(queryResult));
+    const parsed = JSON.parse(out);
+    expect(parsed.data.validationStatus).toBe('valid');
+    expect(parsed.data.fieldFindings[0].path).toBe('contractIds[0]');
+  });
+
+  it('reports malformed fields with actionable errors', async () => {
+    const invalid = {
+      validationStatus: 'invalid',
+      fieldFindings: [
+        { path: 'topics[0]', severity: 'error', message: 'Malformed ScVal topic encoding' },
+        { path: 'ledgerRange', severity: 'error', message: 'Ledger range is reversed' },
+      ],
+      endpointCompatibility: null,
+    };
+    const out = await captureStdout(() => outputJson(invalid));
+    const parsed = JSON.parse(out);
+    expect(parsed.data.validationStatus).toBe('invalid');
+    expect(parsed.data.fieldFindings).toHaveLength(2);
+    expect(parsed.data.fieldFindings[0].severity).toBe('error');
+  });
+
+  it('distinguishes endpoint compatibility results from local validation', async () => {
+    const withEndpoint = {
+      ...queryResult,
+      endpointCompatibility: { checked: true, endpoint: 'https://rpc.example.com', accepted: true },
+    };
+    const out = await captureStdout(() => outputJson(withEndpoint));
+    const parsed = JSON.parse(out);
+    expect(parsed.data.validationStatus).toBe('valid');
+    expect(parsed.data.endpointCompatibility.checked).toBe(true);
+    expect(parsed.data.endpointCompatibility.accepted).toBe(true);
+  });
+
+  it('does not claim event availability from a valid query', async () => {
+    const out = await captureStdout(() => outputJson(queryResult));
+    const parsed = JSON.parse(out);
+    expect(JSON.stringify(parsed.data)).not.toMatch(/guarantee/i);
+  });
+});
+
+describe('memo privacy audit JSON shape', () => {
+  const privacyResult = {
+    memo: { type: 'text', byteLength: 24, redacted: true, value: '[REDACTED]' },
+    findings: [
+      { rule: 'email', severity: 'warning', message: 'Text memo resembles an email address' },
+    ],
+    customRulesApplied: ['email', 'phone'],
+    limitations: ['Pattern matching is indicative, not proof of sensitive data'],
+  };
+
+  it('redacts memo content by default while retaining diagnostic metadata', async () => {
+    const out = await captureStdout(() => outputJson(privacyResult));
+    const parsed = JSON.parse(out);
+    expect(parsed.data.memo.redacted).toBe(true);
+    expect(parsed.data.memo.value).toBe('[REDACTED]');
+    expect(parsed.data.memo.type).toBe('text');
+    expect(parsed.data.memo.byteLength).toBe(24);
+  });
+
+  it('serializes privacy findings and applied custom rules', async () => {
+    const out = await captureStdout(() => outputJson(privacyResult));
+    const parsed = JSON.parse(out);
+    expect(parsed.data.findings[0].rule).toBe('email');
+    expect(parsed.data.findings[0].severity).toBe('warning');
+    expect(parsed.data.customRulesApplied).toContain('phone');
+  });
+
+  it('does not leak raw memo content in the serialized envelope', async () => {
+    const out = await captureStdout(() => outputJson(privacyResult));
+    expect(out).not.toContain('user@example.com');
+    const parsed = JSON.parse(out);
+    expect(parsed.data.memo.value).toBe('[REDACTED]');
+  });
+
+  it('supports explicit memo display when requested', async () => {
+    const displayed = {
+      ...privacyResult,
+      memo: { type: 'text', byteLength: 24, redacted: false, value: 'order-12345' },
+    };
+    const out = await captureStdout(() => outputJson(displayed));
+    const parsed = JSON.parse(out);
+    expect(parsed.data.memo.redacted).toBe(false);
+    expect(parsed.data.memo.value).toBe('order-12345');
+  });
+
+  it('does not apply text-pattern findings to hash memo types', async () => {
+    const hashMemo = {
+      ...privacyResult,
+      memo: { type: 'hash', byteLength: 32, redacted: true, value: '[REDACTED]' },
+      findings: [],
+    };
+    const out = await captureStdout(() => outputJson(hashMemo));
+    const parsed = JSON.parse(out);
+    expect(parsed.data.memo.type).toBe('hash');
+    expect(parsed.data.findings).toEqual([]);
+  });
+});
+
+describe('audit envelopes through outputJsonError', () => {
+  let exitSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    exitSpy = jest.spyOn(process, 'exit').mockImplementation((_code?: string | number | null | undefined) => {
+      throw new Error(`process.exit(${_code})`);
+    });
+  });
+
+  afterEach(() => {
+    exitSpy.mockRestore();
+  });
+
+  it('serializes incomparable snapshot audits as an error envelope', async () => {
+    let out = '';
+    try {
+      out = await captureStdout(() => outputJsonError('Snapshots refer to different accounts', 2));
+    } catch {
+      // process.exit throws in tests
+    }
+    const parsed = JSON.parse(out);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toBe('Snapshots refer to different accounts');
+    expect(parsed.code).toBe(2);
+  });
+
+  it('serializes payment reference lookup failures as an error envelope', async () => {
+    let out = '';
+    try {
+      out = await captureStdout(() => outputJsonError('Transaction hash not found', 2));
+    } catch {
+      // process.exit throws in tests
+    }
+    const parsed = JSON.parse(out);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.code).toBe(2);
+  });
+
+  it('serializes invalid Soroban query configurations as an error envelope', async () => {
+    let out = '';
+    try {
+      out = await captureStdout(() => outputJsonError('Invalid event query configuration', 2));
+    } catch {
+      // process.exit throws in tests
+    }
+    const parsed = JSON.parse(out);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error).toBe('Invalid event query configuration');
+  });
+
+  it('serializes memo privacy audit failures as an error envelope', async () => {
+    let out = '';
+    try {
+      out = await captureStdout(() => outputJsonError('Unable to decode transaction memo', 2));
+    } catch {
+      // process.exit throws in tests
+    }
+    const parsed = JSON.parse(out);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.code).toBe(2);
+  });
+});

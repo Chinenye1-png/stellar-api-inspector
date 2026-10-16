@@ -1,4 +1,5 @@
 import { StrKey } from '@stellar/stellar-sdk';
+import { existsSync, statSync } from 'fs';
 import { validateHorizonUrl } from '../utils/urls';
 import { validateSorobanUrl } from '../inspectors/soroban';
 
@@ -27,4 +28,35 @@ export function validateContractIdPrompt(value: string): true | string {
 export function validatePositiveInteger(value: string): true | string {
   const parsed = Number.parseInt(value, 10);
   return (Number.isInteger(parsed) && parsed > 0) || 'Enter a positive integer';
+}
+
+export function validateReadableFilePath(value: string): true | string {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return 'File path is required';
+  }
+  if (!existsSync(trimmed)) {
+    return 'File does not exist';
+  }
+  try {
+    if (!statSync(trimmed).isFile()) {
+      return 'Path is not a file';
+    }
+  } catch {
+    return 'Unable to read file';
+  }
+  return true;
+}
+
+export function validateJsonInput(value: string): true | string {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return 'JSON value is required';
+  }
+  try {
+    JSON.parse(trimmed);
+  } catch {
+    return 'Invalid JSON';
+  }
+  return true;
 }

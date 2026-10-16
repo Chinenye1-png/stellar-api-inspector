@@ -20,6 +20,10 @@ export type InteractiveAction =
   | 'contract'
   | 'soroban-tx'
   | 'trades'
+  | 'balance-reconcile'
+  | 'soroban-validate'
+  | 'trustline-exposure'
+  | 'federation-validate'
   | 'exit';
 
 export interface InteractiveCommand {
@@ -82,6 +86,10 @@ export async function collectInteractiveCommand(
         { name: 'Inspect Soroban Contract', value: 'contract' },
         { name: 'Inspect Soroban Transaction', value: 'soroban-tx' },
         { name: 'Market Trade History', value: 'trades' },
+        { name: 'Reconcile Account Balance Changes', value: 'balance-reconcile' },
+        { name: 'Validate Soroban Invocation Arguments', value: 'soroban-validate' },
+        { name: 'Audit Trustline Exposure', value: 'trustline-exposure' },
+        { name: 'Validate Federation Response', value: 'federation-validate' },
         { name: 'Exit', value: 'exit' },
       ],
     },
@@ -112,6 +120,14 @@ export async function collectInteractiveCommand(
       return collectSorobanTxCommand(inquirer);
     case 'trades':
       return collectTradesCommand(inquirer);
+    case 'balance-reconcile':
+      return collectBalanceReconcileCommand(inquirer);
+    case 'soroban-validate':
+      return collectSorobanValidateCommand(inquirer);
+    case 'trustline-exposure':
+      return collectTrustlineExposureCommand(inquirer);
+    case 'federation-validate':
+      return collectFederationValidateCommand(inquirer);
     case 'exit':
       return null;
   }
@@ -456,5 +472,176 @@ async function collectTradesCommand(inquirer: PromptModule): Promise<Interactive
     command: 'trades',
     args,
     summary: `stellar-api-inspector trades ${answers.baseAsset} ${answers.counterAsset} --horizon ${answers.horizon} --limit ${answers.limit}`,
+  };
+}
+
+async function collectBalanceReconcileCommand(
+  inquirer: PromptModule,
+): Promise<InteractiveCommand> {
+  const answers = await inquirer.prompt<{
+    before: string;
+    after: string;
+    activity: string;
+    network: string;
+  }>([
+    {
+      type: 'input',
+      name: 'before',
+      message: 'Path to the earlier account snapshot JSON',
+      validate: validateNonEmpty,
+    },
+    {
+      type: 'input',
+      name: 'after',
+      message: 'Path to the later account snapshot JSON',
+      validate: validateNonEmpty,
+    },
+    {
+      type: 'input',
+      name: 'activity',
+      message: 'Optional path to transaction/operation records for the interval',
+      validate: (value: string) => value.trim() === '' || validateNonEmpty(value),
+    },
+    {
+      type: 'input',
+      name: 'network',
+      message: 'Network passphrase or alias',
+      default: 'testnet',
+    },
+  ]);
+
+  const args = [answers.before, answers.after, '--network', answers.network];
+  if (answers.activity.trim()) args.push('--activity', answers.activity.trim());
+
+  return {
+    command: 'balance-reconcile',
+    args,
+    summary: `stellar-api-inspector balance-reconcile ${answers.before} ${answers.after} --network ${answers.network}`,
+  };
+}
+
+async function collectSorobanValidateCommand(
+  inquirer: PromptModule,
+): Promise<InteractiveCommand> {
+  const answers = await inquirer.prompt<{
+    spec: string;
+    function: string;
+    args: string;
+  }>([
+    {
+      type: 'input',
+      name: 'spec',
+      message: 'Path to the contract specification artifact',
+      validate: validateNonEmpty,
+    },
+    {
+      type: 'input',
+      name: 'function',
+      message: 'Target function name',
+      validate: validateNonEmpty,
+    },
+    {
+      type: 'input',
+      name: 'args',
+      message: 'Path to proposed arguments JSON (optional)',
+      validate: (value: string) => value.trim() === '' || validateNonEmpty(value),
+    },
+  ]);
+
+  const args = [answers.spec, '--function', answers.function];
+  if (answers.args.trim()) args.push('--args', answers.args.trim());
+
+  return {
+    command: 'soroban-validate',
+    args,
+    summary: `stellar-api-inspector soroban-validate ${answers.spec} --function ${answers.function}`,
+  };
+}
+
+async function collectTrustlineExposureCommand(
+  inquirer: PromptModule,
+): Promise<InteractiveCommand> {
+  const answers = await inquirer.prompt<{
+    accountId: string;
+    horizon: string;
+    valuations: string;
+    valuationCurrency: string;
+  }>([
+    {
+      type: 'input',
+      name: 'accountId',
+      message: 'Account ID',
+      validate: validateAccountId,
+    },
+    {
+      type: 'input',
+      name: 'horizon',
+      message: 'Horizon endpoint URL',
+      default: 'https://horizon-testnet.stellar.org',
+      validate: validateUrl,
+    },
+    {
+      type: 'input',
+      name: 'valuations',
+      message: 'Optional path to a valuation dataset JSON',
+      validate: (value: string) => value.trim() === '' || validateNonEmpty(value),
+    },
+    {
+      type: 'input',
+      name: 'valuationCurrency',
+      message: 'Optional valuation currency (required with a valuation dataset)',
+      validate: (value: string) => value.trim() === '' || validateNonEmpty(value),
+    },
+  ]);
+
+  const args = [answers.accountId, '--horizon', answers.horizon];
+  if (answers.valuations.trim()) args.push('--valuations', answers.valuations.trim());
+  if (answers.valuationCurrency.trim()) {
+    args.push('--valuation-currency', answers.valuationCurrency.trim());
+  }
+
+  return {
+    command: 'trustline-exposure',
+    args,
+    summary: `stellar-api-inspector trustline-exposure ${answers.accountId} --horizon ${answers.horizon}`,
+  };
+}
+
+async function collectFederationValidateCommand(
+  inquirer: PromptModule,
+): Promise<InteractiveCommand> {
+  const answers = await inquirer.prompt<{
+    response: string;
+    query: string;
+    federation: string;
+  }>([
+    {
+      type: 'input',
+      name: 'response',
+      message: 'Path to a saved federation response JSON',
+      validate: validateNonEmpty,
+    },
+    {
+      type: 'input',
+      name: 'query',
+      message: 'Optional federation lookup query (e.g. user*example.com)',
+      validate: (value: string) => value.trim() === '' || validateNonEmpty(value),
+    },
+    {
+      type: 'input',
+      name: 'federation',
+      message: 'Optional federation endpoint URL for a live lookup',
+      validate: (value: string) => value.trim() === '' || validateUrl(value),
+    },
+  ]);
+
+  const args = [answers.response];
+  if (answers.query.trim()) args.push('--query', answers.query.trim());
+  if (answers.federation.trim()) args.push('--federation', answers.federation.trim());
+
+  return {
+    command: 'federation-validate',
+    args,
+    summary: `stellar-api-inspector federation-validate ${answers.response}`,
   };
 }

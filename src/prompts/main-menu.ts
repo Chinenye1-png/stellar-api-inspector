@@ -20,6 +20,10 @@ export type InteractiveAction =
   | 'contract'
   | 'soroban-tx'
   | 'trades'
+  | 'sep10-audit'
+  | 'payment-flow'
+  | 'event-retention'
+  | 'tx-consistency'
   | 'exit';
 
 export interface InteractiveCommand {
@@ -82,6 +86,10 @@ export async function collectInteractiveCommand(
         { name: 'Inspect Soroban Contract', value: 'contract' },
         { name: 'Inspect Soroban Transaction', value: 'soroban-tx' },
         { name: 'Market Trade History', value: 'trades' },
+        { name: 'Audit SEP-10 Challenge Transaction', value: 'sep10-audit' },
+        { name: 'Analyze Account Payment Flow', value: 'payment-flow' },
+        { name: 'Audit Soroban Event Retention', value: 'event-retention' },
+        { name: 'Audit Horizon Transaction Response Consistency', value: 'tx-consistency' },
         { name: 'Exit', value: 'exit' },
       ],
     },
@@ -112,6 +120,14 @@ export async function collectInteractiveCommand(
       return collectSorobanTxCommand(inquirer);
     case 'trades':
       return collectTradesCommand(inquirer);
+    case 'sep10-audit':
+      return collectSep10AuditCommand(inquirer);
+    case 'payment-flow':
+      return collectPaymentFlowCommand(inquirer);
+    case 'event-retention':
+      return collectEventRetentionCommand(inquirer);
+    case 'tx-consistency':
+      return collectTxConsistencyCommand(inquirer);
     case 'exit':
       return null;
   }
@@ -300,6 +316,147 @@ async function collectContractCommand(inquirer: PromptModule): Promise<Interacti
     command: 'contract',
     args: [answers.contractId, '--rpc', answers.rpc, '--ttl-warning-ledgers', answers.ttlWarning],
     summary: `stellar-api-inspector contract ${answers.contractId} --rpc ${answers.rpc}`,
+  };
+}
+
+async function collectSep10AuditCommand(inquirer: PromptModule): Promise<InteractiveCommand> {
+  const answers = await inquirer.prompt<{
+    xdr: string;
+    serverAccount: string;
+    clientAccount: string;
+    network: string;
+  }>([
+    {
+      type: 'input',
+      name: 'xdr',
+      message: 'SEP-10 challenge transaction envelope XDR',
+      validate: validateNonEmpty,
+    },
+    {
+      type: 'input',
+      name: 'serverAccount',
+      message: 'Expected server account ID',
+      validate: validateAccountId,
+    },
+    {
+      type: 'input',
+      name: 'clientAccount',
+      message: 'Expected client account ID',
+      validate: validateAccountId,
+    },
+    {
+      type: 'input',
+      name: 'network',
+      message: 'Network passphrase or alias',
+      default: 'testnet',
+    },
+  ]);
+
+  const args = [
+    answers.xdr,
+    '--server-account',
+    answers.serverAccount,
+    '--client-account',
+    answers.clientAccount,
+    '--network',
+    answers.network,
+  ];
+
+  return {
+    command: 'sep10-audit',
+    args,
+    summary: `stellar-api-inspector sep10-audit <xdr> --server-account ${answers.serverAccount} --client-account ${answers.clientAccount} --network ${answers.network}`,
+  };
+}
+
+async function collectPaymentFlowCommand(inquirer: PromptModule): Promise<InteractiveCommand> {
+  const answers = await inquirer.prompt<{
+    accountId: string;
+    horizon: string;
+    from: string;
+    to: string;
+    limit: string;
+  }>([
+    {
+      type: 'input',
+      name: 'accountId',
+      message: 'Account ID',
+      validate: validateAccountId,
+    },
+    {
+      type: 'input',
+      name: 'horizon',
+      message: 'Horizon endpoint URL',
+      default: 'https://horizon-testnet.stellar.org',
+      validate: validateUrl,
+    },
+    {
+      type: 'input',
+      name: 'from',
+      message: 'Optional start time or ledger (leave blank for unbounded)',
+    },
+    {
+      type: 'input',
+      name: 'to',
+      message: 'Optional end time or ledger (leave blank for unbounded)',
+    },
+    {
+      type: 'input',
+      name: 'limit',
+      message: 'Maximum records to retrieve',
+      default: '200',
+      validate: validatePositiveInteger,
+    },
+  ]);
+
+  const args = [answers.accountId, '--horizon', answers.horizon, '--limit', answers.limit];
+  if (answers.from.trim()) args.push('--from', answers.from.trim());
+  if (answers.to.trim()) args.push('--to', answers.to.trim());
+
+  return {
+    command: 'payment-flow',
+    args,
+    summary: `stellar-api-inspector payment-flow ${answers.accountId} --horizon ${answers.horizon}`,
+  };
+}
+
+async function collectEventRetentionCommand(inquirer: PromptModule): Promise<InteractiveCommand> {
+  const answers = await inquirer.prompt<{ manifest: string }>([
+    {
+      type: 'input',
+      name: 'manifest',
+      message: 'Path to saved event response pages or retrieval manifest',
+      validate: validateNonEmpty,
+    },
+  ]);
+
+  return {
+    command: 'event-retention',
+    args: [answers.manifest.trim()],
+    summary: `stellar-api-inspector event-retention ${answers.manifest.trim()}`,
+  };
+}
+
+async function collectTxConsistencyCommand(inquirer: PromptModule): Promise<InteractiveCommand> {
+  const answers = await inquirer.prompt<{ response: string; network: string }>([
+    {
+      type: 'input',
+      name: 'response',
+      message: 'Path to Horizon transaction response JSON file',
+      validate: validateNonEmpty,
+    },
+    {
+      type: 'input',
+      name: 'network',
+      message: 'Network passphrase or alias',
+      default: 'testnet',
+    },
+  ]);
+
+  return {
+    command: 'tx-consistency',
+    args: [answers.response.trim(), '--network', answers.network],
+    summary: `stellar-api-inspector tx-consistency ${answers.response.trim()} --network ${answers.network}`,
   };
 }
 

@@ -1,4 +1,5 @@
 import { StrKey } from '@stellar/stellar-sdk';
+import { existsSync, statSync } from 'fs';
 import { validateHorizonUrl } from '../utils/urls';
 import { validateSorobanUrl } from '../inspectors/soroban';
 import { existsSync, statSync, accessSync, constants } from 'fs';

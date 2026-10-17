@@ -24,6 +24,10 @@ export type InteractiveAction =
   | 'soroban-event-query'
   | 'memo-privacy-audit'
   | 'trades'
+  | 'sponsorship'
+  | 'network-compat'
+  | 'entry-ownership'
+  | 'sep30-quorum'
   | 'exit';
 
 export interface InteractiveCommand {
@@ -90,6 +94,10 @@ export async function collectInteractiveCommand(
         { name: 'Validate Soroban Event Query', value: 'soroban-event-query' },
         { name: 'Transaction Memo Privacy Audit', value: 'memo-privacy-audit' },
         { name: 'Market Trade History', value: 'trades' },
+        { name: 'Sponsorship Lifecycle Audit', value: 'sponsorship' },
+        { name: 'Network Fee & Protocol Compatibility Audit', value: 'network-compat' },
+        { name: 'Ledger-Entry Ownership Audit', value: 'entry-ownership' },
+        { name: 'SEP-30 Recovery Signer Quorum Audit', value: 'sep30-quorum' },
         { name: 'Exit', value: 'exit' },
       ],
     },
@@ -128,6 +136,14 @@ export async function collectInteractiveCommand(
       return collectMemoPrivacyAuditCommand(inquirer);
     case 'trades':
       return collectTradesCommand(inquirer);
+    case 'sponsorship':
+      return collectSponsorshipCommand(inquirer);
+    case 'network-compat':
+      return collectNetworkCompatCommand(inquirer);
+    case 'entry-ownership':
+      return collectEntryOwnershipCommand(inquirer);
+    case 'sep30-quorum':
+      return collectSep30QuorumCommand(inquirer);
     case 'exit':
       return null;
   }
@@ -643,5 +659,114 @@ async function collectTradesCommand(inquirer: PromptModule): Promise<Interactive
     command: 'trades',
     args,
     summary: `stellar-api-inspector trades ${answers.baseAsset} ${answers.counterAsset} --horizon ${answers.horizon} --limit ${answers.limit}`,
+  };
+}
+
+async function collectSponsorshipCommand(inquirer: PromptModule): Promise<InteractiveCommand> {
+  const answers = await inquirer.prompt<{ accountId: string; horizon: string }>([
+    {
+      type: 'input',
+      name: 'accountId',
+      message: 'Account ID',
+      validate: validateAccountId,
+    },
+    {
+      type: 'input',
+      name: 'horizon',
+      message: 'Horizon endpoint URL',
+      default: 'https://horizon-testnet.stellar.org',
+      validate: validateUrl,
+    },
+  ]);
+
+  return {
+    command: 'sponsorship',
+    args: [answers.accountId, '--horizon', answers.horizon],
+    summary: `stellar-api-inspector sponsorship ${answers.accountId} --horizon ${answers.horizon}`,
+  };
+}
+
+async function collectNetworkCompatCommand(inquirer: PromptModule): Promise<InteractiveCommand> {
+  const answers = await inquirer.prompt<{ horizon: string; rpc: string }>([
+    {
+      type: 'input',
+      name: 'horizon',
+      message: 'Horizon endpoint URL',
+      default: 'https://horizon-testnet.stellar.org',
+      validate: validateUrl,
+    },
+    {
+      type: 'input',
+      name: 'rpc',
+      message: 'Optional Soroban RPC URL',
+      validate: (value: string) => value.trim() === '' || validateSorobanRpcUrl(value),
+    },
+  ]);
+
+  const args = ['--horizon', answers.horizon];
+  if (answers.rpc.trim()) args.push('--rpc', answers.rpc.trim());
+
+  return {
+    command: 'network-compat',
+    args,
+    summary: `stellar-api-inspector network-compat ${args.join(' ')}`,
+  };
+}
+
+async function collectEntryOwnershipCommand(inquirer: PromptModule): Promise<InteractiveCommand> {
+  const answers = await inquirer.prompt<{ accountId: string; horizon: string }>([
+    {
+      type: 'input',
+      name: 'accountId',
+      message: 'Account ID',
+      validate: validateAccountId,
+    },
+    {
+      type: 'input',
+      name: 'horizon',
+      message: 'Horizon endpoint URL',
+      default: 'https://horizon-testnet.stellar.org',
+      validate: validateUrl,
+    },
+  ]);
+
+  return {
+    command: 'entry-ownership',
+    args: [answers.accountId, '--horizon', answers.horizon],
+    summary: `stellar-api-inspector entry-ownership ${answers.accountId} --horizon ${answers.horizon}`,
+  };
+}
+
+async function collectSep30QuorumCommand(inquirer: PromptModule): Promise<InteractiveCommand> {
+  const answers = await inquirer.prompt<{
+    accountId: string;
+    recoveryFile: string;
+    horizon: string;
+  }>([
+    {
+      type: 'input',
+      name: 'accountId',
+      message: 'Account ID',
+      validate: validateAccountId,
+    },
+    {
+      type: 'input',
+      name: 'recoveryFile',
+      message: 'Path to SEP-30 recovery account response file',
+      validate: validateNonEmpty,
+    },
+    {
+      type: 'input',
+      name: 'horizon',
+      message: 'Horizon endpoint URL',
+      default: 'https://horizon-testnet.stellar.org',
+      validate: validateUrl,
+    },
+  ]);
+
+  return {
+    command: 'sep30-quorum',
+    args: [answers.accountId, '--recovery-file', answers.recoveryFile, '--horizon', answers.horizon],
+    summary: `stellar-api-inspector sep30-quorum ${answers.accountId} --recovery-file ${answers.recoveryFile} --horizon ${answers.horizon}`,
   };
 }

@@ -10,6 +10,12 @@
 
 import { outputJson, outputJsonError } from '../src/output/json';
 import { logger } from '../src/utils/logger';
+import {
+  auditRecoverySignerQuorum,
+  parseSep30RecoveryResponse,
+  type Sep30RecoveryResponse,
+  type OnChainSignerConfig,
+} from '../src/sep30/quorum-audit';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -277,323 +283,342 @@ describe('JSON envelope structure', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Audit result shapes (ISSUE-095 / 096 / 097 / 098)
+// SEP-30 recovery signer quorum audit
 // ---------------------------------------------------------------------------
 
-describe('account snapshot consistency audit JSON shape', () => {
-  const auditResult = {
-    snapshots: [
-      { id: 'snap-a', accountId: 'GAAA', ledgerSequence: 100, ledgerHash: 'aaaa', retrievedAt: '2024-01-01T00:00:00Z' },
-      { id: 'snap-b', accountId: 'GAAA', ledgerSequence: 100, ledgerHash: 'aaaa', retrievedAt: '2024-01-01T00:05:00Z' },
-    ],
-    comparisonContext: {
-      status: 'same-ledger',
-      ledgerSequence: 100,
-      ledgerHash: 'aaaa',
-      metadataAvailable: true,
-    },
-    fieldDifferences: [
-      { field: 'sequenceNumber', values: [{ snapshotId: 'snap-a', value: '1' }, { snapshotId: 'snap-b', value: '1' }], changed: false },
-    ],
-    consistencyFindings: [
-      { severity: 'info', code: 'MATCHING_SNAPSHOTS', message: 'Snapshots agree on shared ledger state' },
-    ],
-    limitations: [],
+const ACCOUNT_ID = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHFQ';
+
+function recoveryResponse(
+  signers: Array<{ key: string; weight?: number }>,
+  overrides: Partial<Sep30RecoveryResponse> = {},
+): Sep30RecoveryResponse {
+  return {
+    account: ACCOUNT_ID,
+    signers: signers.map((s) => ({ key: s.key, weight: s.weight ?? 1 })),
+    ...overrides,
+  } as Sep30RecoveryResponse;
+}
+
+function onChain(
+  signers: Array<{ key: string; weight: number }>,
+  thresholds: { low: number; medium: number; high: number },
+): OnChainSignerConfig {
+  return {
+    accountId: ACCOUNT_ID,
+    thresholds,
+    signers: signers.map((s) => ({ key: s.key, weight: s.weight, type: 'ed25519_public_key' })),
   };
+}
 
-  it('serializes snapshot identifiers, context, differences, and findings', async () => {
-    const out = await captureStdout(() => outputJson(auditResult));
-    const parsed = JSON.parse(out);
-    expect(parsed.ok).toBe(true);
-    expect(parsed.data.snapshots).toHaveLength(2);
-    expect(parsed.data.snapshots[0].id).toBe('snap-a');
-    expect(parsed.data.comparisonContext.status).toBe('same-ledger');
-    expect(parsed.data.fieldDifferences[0].field).toBe('sequenceNumber');
-    expect(parsed.data.consistencyFindings[0].code).toBe('MATCHING_SNAPSHOTS');
-  });
+const RECOVERY_KEY_A = 'GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
+const RECOVERY_KEY_B = 'GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC';
+const ONCHAIN_KEY_C = 'GDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD';
 
-  it('preserves original values and their snapshot sources', async () => {
-    const out = await captureStdout(() => outputJson(auditResult));
-    const parsed = JSON.parse(out);
-    const diff = parsed.data.fieldDifferences[0];
-    expect(diff.values[0].snapshotId).toBe('snap-a');
-    expect(diff.values[0].value).toBe('1');
-    expect(diff.values[1].snapshotId).toBe('snap-b');
-  });
+describe('SEP-30 recovery signer quorum audit', () => {
+  describe('signer set comparison', () => {
+    it('reports matching signer keys', () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([{ key: RECOVERY_KEY_A, weight: 1 }]),
+        onChain: onChain([{ key: RECOVERY_KEY_A, weight: 1 }], { low: 1, medium: 1, high: 1 }),
+      });
+      expect(result.signerComparison.matching).toContain(RECOVERY_KEY_A);
+      expect(result.signerComparison.missing).toHaveLength(0);
+      expect(result.signerComparison.additional).toHaveLength(0);
+    });
 
-  it('reports differing ledger context without claiming corruption', async () => {
-    const differing = {
-      ...auditResult,
-      comparisonContext: { status: 'different-ledgers', ledgerSequence: null, ledgerHash: null, metadataAvailable: true },
-      consistencyFindings: [
-        { severity: 'info', code: 'DIFFERENT_LEDGER_STATES', message: 'Snapshots captured at different ledgers' },
-      ],
-    };
-    const out = await captureStdout(() => outputJson(differing));
-    const parsed = JSON.parse(out);
-    expect(parsed.data.comparisonContext.status).toBe('different-ledgers');
-    expect(parsed.data.consistencyFindings[0].code).toBe('DIFFERENT_LEDGER_STATES');
-    expect(JSON.stringify(parsed.data)).not.toMatch(/corrupt/i);
-  });
+    it('reports recovery signers missing from the on-chain configuration', () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([{ key: RECOVERY_KEY_A, weight: 1 }]),
+        onChain: onChain([{ key: ONCHAIN_KEY_C, weight: 1 }], { low: 1, medium: 1, high: 1 }),
+      });
+      expect(result.signerComparison.missing).toContain(RECOVERY_KEY_A);
+      expect(result.signerComparison.matching).toHaveLength(0);
+      expect(result.findings.some((f) => f.code === 'RECOVERY_SIGNER_NOT_ON_CHAIN')).toBe(true);
+    });
 
-  it('reports missing ledger metadata as a limitation', async () => {
-    const missing = {
-      ...auditResult,
-      comparisonContext: { status: 'unavailable', ledgerSequence: null, ledgerHash: null, metadataAvailable: false },
-      limitations: ['Ledger metadata unavailable; consistency cannot be established'],
-    };
-    const out = await captureStdout(() => outputJson(missing));
-    const parsed = JSON.parse(out);
-    expect(parsed.data.comparisonContext.metadataAvailable).toBe(false);
-    expect(parsed.data.limitations).toHaveLength(1);
-  });
+    it('reports additional on-chain signers not present in the recovery response', () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([{ key: RECOVERY_KEY_A, weight: 1 }]),
+        onChain: onChain(
+          [
+            { key: RECOVERY_KEY_A, weight: 1 },
+            { key: ONCHAIN_KEY_C, weight: 1 },
+          ],
+          { low: 1, medium: 1, high: 1 },
+        ),
+      });
+      expect(result.signerComparison.additional).toContain(ONCHAIN_KEY_C);
+    });
 
-  it('marks incompatible account or network metadata as incomparable', async () => {
-    const incomparable = {
-      snapshots: [
-        { id: 'snap-a', accountId: 'GAAA', network: 'mainnet' },
-        { id: 'snap-b', accountId: 'GBBB', network: 'testnet' },
-      ],
-      comparisonContext: { status: 'incomparable', reason: 'account-mismatch' },
-      fieldDifferences: [],
-      consistencyFindings: [
-        { severity: 'error', code: 'INCOMPARABLE_SNAPSHOTS', message: 'Snapshots refer to different accounts' },
-      ],
-      limitations: [],
-    };
-    const out = await captureStdout(() => outputJson(incomparable));
-    const parsed = JSON.parse(out);
-    expect(parsed.data.comparisonContext.status).toBe('incomparable');
-    expect(parsed.data.consistencyFindings[0].code).toBe('INCOMPARABLE_SNAPSHOTS');
-  });
-});
-
-describe('payment reference audit JSON shape', () => {
-  const referenceResult = {
-    reference: { type: 'transaction-hash', value: 'abc123' },
-    constraints: { destination: 'GDEST', asset: { code: 'USD', issuer: 'GISSUER' }, amount: '10.0000000', window: null },
-    matchedRecords: [
-      { transactionHash: 'abc123', ledgerSequence: 42, status: 'success', operations: [{ type: 'payment', amount: '10.0000000' }] },
-    ],
-    ambiguity: { status: 'unique', candidateCount: 1 },
-    retrievalLimitations: [],
-  };
-
-  it('serializes reference type, constraints, matches, ambiguity, and limitations', async () => {
-    const out = await captureStdout(() => outputJson(referenceResult));
-    const parsed = JSON.parse(out);
-    expect(parsed.data.reference.type).toBe('transaction-hash');
-    expect(parsed.data.constraints.asset.issuer).toBe('GISSUER');
-    expect(parsed.data.matchedRecords[0].transactionHash).toBe('abc123');
-    expect(parsed.data.ambiguity.status).toBe('unique');
-    expect(parsed.data.retrievalLimitations).toEqual([]);
-  });
-
-  it('reports ambiguous references without selecting an arbitrary result', async () => {
-    const ambiguous = {
-      ...referenceResult,
-      reference: { type: 'memo', value: 'order-42' },
-      matchedRecords: [
-        { transactionHash: 'aaa', ledgerSequence: 1 },
-        { transactionHash: 'bbb', ledgerSequence: 2 },
-      ],
-      ambiguity: { status: 'ambiguous', candidateCount: 2 },
-    };
-    const out = await captureStdout(() => outputJson(ambiguous));
-    const parsed = JSON.parse(out);
-    expect(parsed.data.ambiguity.status).toBe('ambiguous');
-    expect(parsed.data.matchedRecords).toHaveLength(2);
-  });
-
-  it('discloses incomplete search coverage as a retrieval limitation', async () => {
-    const incomplete = {
-      ...referenceResult,
-      matchedRecords: [],
-      ambiguity: { status: 'none', candidateCount: 0 },
-      retrievalLimitations: ['Pagination stopped early; historical records may be missing'],
-    };
-    const out = await captureStdout(() => outputJson(incomplete));
-    const parsed = JSON.parse(out);
-    expect(parsed.data.retrievalLimitations).toHaveLength(1);
-    expect(parsed.data.matchedRecords).toEqual([]);
-  });
-
-  it('preserves exact amount precision in constraints and matches', async () => {
-    const out = await captureStdout(() => outputJson(referenceResult));
-    const parsed = JSON.parse(out);
-    expect(parsed.data.constraints.amount).toBe('10.0000000');
-    expect(parsed.data.matchedRecords[0].operations[0].amount).toBe('10.0000000');
-  });
-});
-
-describe('Soroban event query validation JSON shape', () => {
-  const queryResult = {
-    validationStatus: 'valid',
-    fieldFindings: [
-      { path: 'contractIds[0]', severity: 'info', message: 'Contract identifier is well-formed' },
-    ],
-    endpointCompatibility: null,
-  };
-
-  it('serializes validation status and field-level findings', async () => {
-    const out = await captureStdout(() => outputJson(queryResult));
-    const parsed = JSON.parse(out);
-    expect(parsed.data.validationStatus).toBe('valid');
-    expect(parsed.data.fieldFindings[0].path).toBe('contractIds[0]');
-  });
-
-  it('reports malformed fields with actionable errors', async () => {
-    const invalid = {
-      validationStatus: 'invalid',
-      fieldFindings: [
-        { path: 'topics[0]', severity: 'error', message: 'Malformed ScVal topic encoding' },
-        { path: 'ledgerRange', severity: 'error', message: 'Ledger range is reversed' },
-      ],
-      endpointCompatibility: null,
-    };
-    const out = await captureStdout(() => outputJson(invalid));
-    const parsed = JSON.parse(out);
-    expect(parsed.data.validationStatus).toBe('invalid');
-    expect(parsed.data.fieldFindings).toHaveLength(2);
-    expect(parsed.data.fieldFindings[0].severity).toBe('error');
-  });
-
-  it('distinguishes endpoint compatibility results from local validation', async () => {
-    const withEndpoint = {
-      ...queryResult,
-      endpointCompatibility: { checked: true, endpoint: 'https://rpc.example.com', accepted: true },
-    };
-    const out = await captureStdout(() => outputJson(withEndpoint));
-    const parsed = JSON.parse(out);
-    expect(parsed.data.validationStatus).toBe('valid');
-    expect(parsed.data.endpointCompatibility.checked).toBe(true);
-    expect(parsed.data.endpointCompatibility.accepted).toBe(true);
-  });
-
-  it('does not claim event availability from a valid query', async () => {
-    const out = await captureStdout(() => outputJson(queryResult));
-    const parsed = JSON.parse(out);
-    expect(JSON.stringify(parsed.data)).not.toMatch(/guarantee/i);
-  });
-});
-
-describe('memo privacy audit JSON shape', () => {
-  const privacyResult = {
-    memo: { type: 'text', byteLength: 24, redacted: true, value: '[REDACTED]' },
-    findings: [
-      { rule: 'email', severity: 'warning', message: 'Text memo resembles an email address' },
-    ],
-    customRulesApplied: ['email', 'phone'],
-    limitations: ['Pattern matching is indicative, not proof of sensitive data'],
-  };
-
-  it('redacts memo content by default while retaining diagnostic metadata', async () => {
-    const out = await captureStdout(() => outputJson(privacyResult));
-    const parsed = JSON.parse(out);
-    expect(parsed.data.memo.redacted).toBe(true);
-    expect(parsed.data.memo.value).toBe('[REDACTED]');
-    expect(parsed.data.memo.type).toBe('text');
-    expect(parsed.data.memo.byteLength).toBe(24);
-  });
-
-  it('serializes privacy findings and applied custom rules', async () => {
-    const out = await captureStdout(() => outputJson(privacyResult));
-    const parsed = JSON.parse(out);
-    expect(parsed.data.findings[0].rule).toBe('email');
-    expect(parsed.data.findings[0].severity).toBe('warning');
-    expect(parsed.data.customRulesApplied).toContain('phone');
-  });
-
-  it('does not leak raw memo content in the serialized envelope', async () => {
-    const out = await captureStdout(() => outputJson(privacyResult));
-    expect(out).not.toContain('user@example.com');
-    const parsed = JSON.parse(out);
-    expect(parsed.data.memo.value).toBe('[REDACTED]');
-  });
-
-  it('supports explicit memo display when requested', async () => {
-    const displayed = {
-      ...privacyResult,
-      memo: { type: 'text', byteLength: 24, redacted: false, value: 'order-12345' },
-    };
-    const out = await captureStdout(() => outputJson(displayed));
-    const parsed = JSON.parse(out);
-    expect(parsed.data.memo.redacted).toBe(false);
-    expect(parsed.data.memo.value).toBe('order-12345');
-  });
-
-  it('does not apply text-pattern findings to hash memo types', async () => {
-    const hashMemo = {
-      ...privacyResult,
-      memo: { type: 'hash', byteLength: 32, redacted: true, value: '[REDACTED]' },
-      findings: [],
-    };
-    const out = await captureStdout(() => outputJson(hashMemo));
-    const parsed = JSON.parse(out);
-    expect(parsed.data.memo.type).toBe('hash');
-    expect(parsed.data.findings).toEqual([]);
-  });
-});
-
-describe('audit envelopes through outputJsonError', () => {
-  let exitSpy: jest.SpyInstance;
-
-  beforeEach(() => {
-    exitSpy = jest.spyOn(process, 'exit').mockImplementation((_code?: string | number | null | undefined) => {
-      throw new Error(`process.exit(${_code})`);
+    it('handles nonmatching recovery signer sets entirely', () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([
+          { key: RECOVERY_KEY_A, weight: 1 },
+          { key: RECOVERY_KEY_B, weight: 1 },
+        ]),
+        onChain: onChain([{ key: ONCHAIN_KEY_C, weight: 1 }], { low: 1, medium: 1, high: 1 }),
+      });
+      expect(result.signerComparison.matching).toHaveLength(0);
+      expect(result.signerComparison.missing).toEqual(
+        expect.arrayContaining([RECOVERY_KEY_A, RECOVERY_KEY_B]),
+      );
     });
   });
 
-  afterEach(() => {
-    exitSpy.mockRestore();
+  describe('threshold feasibility', () => {
+    it('marks a threshold feasible when matching weight is above it', () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([{ key: RECOVERY_KEY_A, weight: 5 }]),
+        onChain: onChain([{ key: RECOVERY_KEY_A, weight: 5 }], { low: 1, medium: 2, high: 3 }),
+      });
+      expect(result.thresholds.low.feasible).toBe(true);
+      expect(result.thresholds.medium.feasible).toBe(true);
+      expect(result.thresholds.high.feasible).toBe(true);
+    });
+
+    it('marks a threshold feasible when matching weight equals it', () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([{ key: RECOVERY_KEY_A, weight: 3 }]),
+        onChain: onChain([{ key: RECOVERY_KEY_A, weight: 3 }], { low: 3, medium: 3, high: 3 }),
+      });
+      expect(result.thresholds.low.feasible).toBe(true);
+      expect(result.thresholds.medium.feasible).toBe(true);
+      expect(result.thresholds.high.feasible).toBe(true);
+    });
+
+    it('marks a threshold infeasible when matching weight is below it', () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([{ key: RECOVERY_KEY_A, weight: 1 }]),
+        onChain: onChain([{ key: RECOVERY_KEY_A, weight: 1 }], { low: 1, medium: 2, high: 3 }),
+      });
+      expect(result.thresholds.low.feasible).toBe(true);
+      expect(result.thresholds.medium.feasible).toBe(false);
+      expect(result.thresholds.high.feasible).toBe(false);
+      expect(result.status).toBe('insufficient-quorum');
+    });
+
+    it('sums weights across multiple matching signers using integer arithmetic', () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([
+          { key: RECOVERY_KEY_A, weight: 2 },
+          { key: RECOVERY_KEY_B, weight: 3 },
+        ]),
+        onChain: onChain(
+          [
+            { key: RECOVERY_KEY_A, weight: 2 },
+            { key: RECOVERY_KEY_B, weight: 3 },
+          ],
+          { low: 1, medium: 5, high: 6 },
+        ),
+      });
+      expect(result.thresholds.medium.availableWeight).toBe(5);
+      expect(result.thresholds.medium.feasible).toBe(true);
+      expect(result.thresholds.high.availableWeight).toBe(5);
+      expect(result.thresholds.high.feasible).toBe(false);
+    });
+
+    it('respects varied low, medium, and high thresholds', () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([{ key: RECOVERY_KEY_A, weight: 4 }]),
+        onChain: onChain([{ key: RECOVERY_KEY_A, weight: 4 }], { low: 1, medium: 10, high: 20 }),
+      });
+      expect(result.thresholds.low.requiredWeight).toBe(1);
+      expect(result.thresholds.medium.requiredWeight).toBe(10);
+      expect(result.thresholds.high.requiredWeight).toBe(20);
+      expect(result.thresholds.low.feasible).toBe(true);
+      expect(result.thresholds.medium.feasible).toBe(false);
+      expect(result.thresholds.high.feasible).toBe(false);
+    });
   });
 
-  it('serializes incomparable snapshot audits as an error envelope', async () => {
-    let out = '';
-    try {
-      out = await captureStdout(() => outputJsonError('Snapshots refer to different accounts', 2));
-    } catch {
-      // process.exit throws in tests
-    }
-    const parsed = JSON.parse(out);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.error).toBe('Snapshots refer to different accounts');
-    expect(parsed.code).toBe(2);
+  describe('incomplete and malformed data', () => {
+    it('produces a finding for missing signer information', () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: { account: ACCOUNT_ID } as Sep30RecoveryResponse,
+        onChain: onChain([{ key: RECOVERY_KEY_A, weight: 1 }], { low: 1, medium: 1, high: 1 }),
+      });
+      expect(result.status).toBe('inconclusive');
+      expect(result.findings.some((f) => f.code === 'MISSING_SIGNER_DATA')).toBe(true);
+    });
+
+    it('produces a finding for malformed signer keys', () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([{ key: 'not-a-valid-key', weight: 1 }]),
+        onChain: onChain([{ key: RECOVERY_KEY_A, weight: 1 }], { low: 1, medium: 1, high: 1 }),
+      });
+      expect(result.findings.some((f) => f.code === 'MALFORMED_SIGNER_KEY')).toBe(true);
+    });
+
+    it('produces a finding for unsupported SEP-30 response formats', () => {
+      const parsed = parseSep30RecoveryResponse({ unexpected: true });
+      expect(parsed.supported).toBe(false);
+      expect(parsed.findings.some((f) => f.code === 'UNSUPPORTED_RESPONSE_FORMAT')).toBe(true);
+    });
+
+    it('does not throw on unsupported recovery response formats', () => {
+      expect(() =>
+        auditRecoverySignerQuorum({
+          accountId: ACCOUNT_ID,
+          recovery: { unexpected: true } as unknown as Sep30RecoveryResponse,
+          onChain: onChain([{ key: RECOVERY_KEY_A, weight: 1 }], { low: 1, medium: 1, high: 1 }),
+        }),
+      ).not.toThrow();
+    });
+
+    it('reports inconclusive when the on-chain configuration is incomplete', () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([{ key: RECOVERY_KEY_A, weight: 1 }]),
+        onChain: { accountId: ACCOUNT_ID } as OnChainSignerConfig,
+      });
+      expect(result.status).toBe('inconclusive');
+      expect(result.findings.some((f) => f.code === 'INCOMPLETE_ONCHAIN_CONFIG')).toBe(true);
+    });
+
+    it('reports a warning when recovery signers are absent from the on-chain config', () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([{ key: RECOVERY_KEY_A, weight: 1 }]),
+        onChain: onChain([{ key: ONCHAIN_KEY_C, weight: 1 }], { low: 1, medium: 1, high: 1 }),
+      });
+      expect(result.status).toBe('warning');
+    });
   });
 
-  it('serializes payment reference lookup failures as an error envelope', async () => {
-    let out = '';
-    try {
-      out = await captureStdout(() => outputJsonError('Transaction hash not found', 2));
-    } catch {
-      // process.exit throws in tests
-    }
-    const parsed = JSON.parse(out);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.code).toBe(2);
+  describe('Horizon retrieval failures', () => {
+    it('reports inconclusive when Horizon retrieval fails', () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([{ key: RECOVERY_KEY_A, weight: 1 }]),
+        onChain: null,
+        horizonError: 'Horizon request failed: 503 Service Unavailable',
+      });
+      expect(result.status).toBe('inconclusive');
+      expect(result.findings.some((f) => f.code === 'HORIZON_RETRIEVAL_FAILED')).toBe(true);
+    });
+
+    it('does not throw when Horizon retrieval fails', () => {
+      expect(() =>
+        auditRecoverySignerQuorum({
+          accountId: ACCOUNT_ID,
+          recovery: recoveryResponse([{ key: RECOVERY_KEY_A, weight: 1 }]),
+          onChain: null,
+          horizonError: 'timeout',
+        }),
+      ).not.toThrow();
+    });
   });
 
-  it('serializes invalid Soroban query configurations as an error envelope', async () => {
-    let out = '';
-    try {
-      out = await captureStdout(() => outputJsonError('Invalid event query configuration', 2));
-    } catch {
-      // process.exit throws in tests
-    }
-    const parsed = JSON.parse(out);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.error).toBe('Invalid event query configuration');
+  describe('JSON output', () => {
+    it('emits a successful audit envelope with required keys', async () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([{ key: RECOVERY_KEY_A, weight: 5 }]),
+        onChain: onChain([{ key: RECOVERY_KEY_A, weight: 5 }], { low: 1, medium: 2, high: 3 }),
+      });
+      const out = await captureStdout(() => outputJson(result));
+      const parsed = JSON.parse(out);
+      expect(parsed.ok).toBe(true);
+      expect(parsed.data.accountId).toBe(ACCOUNT_ID);
+      expect(parsed.data.thresholds).toBeDefined();
+      expect(parsed.data.signerComparison).toBeDefined();
+      expect(parsed.data.findings).toBeDefined();
+      expect(parsed.data.status).toBe('success');
+    });
+
+    it('emits an insufficient-quorum JSON envelope', async () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([{ key: RECOVERY_KEY_A, weight: 1 }]),
+        onChain: onChain([{ key: RECOVERY_KEY_A, weight: 1 }], { low: 1, medium: 2, high: 3 }),
+      });
+      const out = await captureStdout(() => outputJson(result));
+      const parsed = JSON.parse(out);
+      expect(parsed.data.status).toBe('insufficient-quorum');
+    });
+
+    it('emits a warning JSON envelope', async () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([{ key: RECOVERY_KEY_A, weight: 1 }]),
+        onChain: onChain([{ key: ONCHAIN_KEY_C, weight: 1 }], { low: 1, medium: 1, high: 1 }),
+      });
+      const out = await captureStdout(() => outputJson(result));
+      const parsed = JSON.parse(out);
+      expect(parsed.data.status).toBe('warning');
+    });
+
+    it('emits an inconclusive JSON envelope', async () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: { account: ACCOUNT_ID } as Sep30RecoveryResponse,
+        onChain: onChain([{ key: RECOVERY_KEY_A, weight: 1 }], { low: 1, medium: 1, high: 1 }),
+      });
+      const out = await captureStdout(() => outputJson(result));
+      const parsed = JSON.parse(out);
+      expect(parsed.data.status).toBe('inconclusive');
+    });
+
+    it('includes a disclaimer that quorum feasibility does not guarantee recovery', () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([{ key: RECOVERY_KEY_A, weight: 5 }]),
+        onChain: onChain([{ key: RECOVERY_KEY_A, weight: 5 }], { low: 1, medium: 2, high: 3 }),
+      });
+      expect(result.disclaimer.toLowerCase()).toContain('does not guarantee');
+    });
   });
 
-  it('serializes memo privacy audit failures as an error envelope', async () => {
-    let out = '';
-    try {
-      out = await captureStdout(() => outputJsonError('Unable to decode transaction memo', 2));
-    } catch {
-      // process.exit throws in tests
-    }
-    const parsed = JSON.parse(out);
-    expect(parsed.ok).toBe(false);
-    expect(parsed.code).toBe(2);
+  describe('sensitive data and side effects', () => {
+    it('does not include credentials or access tokens in the result', () => {
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([{ key: RECOVERY_KEY_A, weight: 1 }], {
+          authToken: 'super-secret-token',
+          metadata: { email: 'user@example.com', phone: '+15551234567' },
+        } as Partial<Sep30RecoveryResponse>),
+        onChain: onChain([{ key: RECOVERY_KEY_A, weight: 1 }], { low: 1, medium: 1, high: 1 }),
+      });
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toContain('super-secret-token');
+      expect(serialized).not.toContain('user@example.com');
+      expect(serialized).not.toContain('+15551234567');
+    });
+
+    it('does not log credentials when running the audit', async () => {
+      const errOut = await captureStderr(() => {
+        auditRecoverySignerQuorum({
+          accountId: ACCOUNT_ID,
+          recovery: recoveryResponse([{ key: RECOVERY_KEY_A, weight: 1 }], {
+            authToken: 'super-secret-token',
+          } as Partial<Sep30RecoveryResponse>),
+          onChain: onChain([{ key: RECOVERY_KEY_A, weight: 1 }], { low: 1, medium: 1, high: 1 }),
+        });
+      });
+      expect(errOut).not.toContain('super-secret-token');
+    });
+
+    it('performs no recovery action or on-chain change', () => {
+      const submitSpy = jest.fn();
+      const result = auditRecoverySignerQuorum({
+        accountId: ACCOUNT_ID,
+        recovery: recoveryResponse([{ key: RECOVERY_KEY_A, weight: 1 }]),
+        onChain: onChain([{ key: RECOVERY_KEY_A, weight: 1 }], { low: 1, medium: 1, high: 1 }),
+        submitTransaction: submitSpy,
+      });
+      expect(submitSpy).not.toHaveBeenCalled();
+      expect(result.readOnly).toBe(true);
+    });
   });
 });

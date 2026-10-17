@@ -1,6 +1,11 @@
 import { Keypair } from '@stellar/stellar-sdk';
 import { auditAccountMerge, validateMergeAccountIds } from '../src/inspectors/account-merge-audit';
 import { formatAccountMergeAudit } from '../src/output/account-merge-audit';
+import {
+  auditAccountSnapshotConsistency,
+  validateSnapshotAccountIds,
+} from '../src/inspectors/account-snapshot-consistency';
+import { formatAccountSnapshotConsistencyAudit } from '../src/output/account-snapshot-consistency';
 
 const sourceId = Keypair.random().publicKey();
 const destinationId = Keypair.random().publicKey();
@@ -238,5 +243,222 @@ describe('account merge safety audit', () => {
     expect(text).toContain('REQUIRES-CLEANUP');
     expect(text).toContain('Remove account data entries before merging.');
     expect(JSON.stringify(result)).toContain('selling_liabilities');
+  });
+});
+
+function snapshot(accountId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id: accountId,
+    account_id: accountId,
+    sequence: '100',
+    subentry_count: 0,
+    balances: [
+      {
+        asset_type: 'native',
+        balance: '100.0000000',
+        selling_liabilities: '0.0000000',
+        buying_liabilities: '0.0000000',
+      },
+    ],
+    signers: [{ key: accountId, weight: 1, type: 'ed25519_public_key' }],
+    thresholds: { low_threshold: 1, med_threshold: 1, high_threshold: 1 },
+    home_domain: 'example.test',
+    data: {},
+    ...overrides,
+  };
+}
+
+function snapshotInput(
+  accountId: string,
+  overrides: Record<string, unknown> = {},
+  meta: Record<string, unknown> = {},
+) {
+  return {
+    label: `snapshot-${accountId.slice(0, 4)}`,
+    source: 'file',
+    account: snapshot(accountId, overrides),
+    ledgerSequence: 1000,
+    ledgerHash: 'abc123',
+    lastModifiedLedger: 1000,
+    retrievedAt: '2024-01-01T00:00:00.000Z',
+    ...meta,
+  };
+}
+
+describe('account snapshot consistency audit', () => {
+  it('reports matching snapshots as consistent', () => {
+    const result = auditAccountSnapshotConsistency([
+      snapshotInput(sourceId),
+      snapshotInput(sourceId, {}, { label: 'snapshot-b' }),
+    ]);
+    expect(result.consistent).toBe(true);
+    expect(result.ledgerContext.status).toBe('matching');
+    expect(result.findings.map((finding) => finding.code)).not.toContain('field-difference');
+    expect(result.readOnly).toBe(true);
+  });
+
+  it('reports differing ledger sequences and hashes as different ledger states', () => {
+    const result = auditAccountSnapshotConsistency([
+      snapshotInput(sourceId),
+      snapshotInput(sourceId, {}, { ledgerSequence: 1001, ledgerHash: 'def456' }),
+    ]);
+    expect(result.ledgerContext.status).toBe('differing');
+    expect(result.ledgerContext.ledgerSequences).toEqual([1000, 1001]);
+    expect(result.ledgerContext.ledgerHashes).toEqual(['abc123', 'def456']);
+    expect(result.consistent).toBe(true);
+  });
+
+  it('reports missing ledger metadata as a limitation rather than inconsistency', () => {
+    const result = auditAccountSnapshotConsistency([
+      snapshotInput(sourceId, {}, { ledgerSequence: undefined, ledgerHash: undefined }),
+      snapshotInput(sourceId, {}, { ledgerSequence: undefined, ledgerHash: undefined }),
+    ]);
+    expect(result.ledgerContext.status).toBe('unavailable');
+    expect(result.consistent).toBe(true);
+    expect(result.findings.map((finding) => finding.code)).toContain('ledger-context-unavailable');
+  });
+
+  it('rejects snapshots for different accounts', () => {
+    const validation = validateSnapshotAccountIds([
+      snapshotInput(sourceId),
+      snapshotInput(destinationId),
+    ]);
+    expect(validation.valid).toBe(false);
+    expect(() =>
+      auditAccountSnapshotConsistency([snapshotInput(sourceId), snapshotInput(destinationId)]),
+    ).toThrow(/account/i);
+  });
+
+  it('rejects snapshots from incompatible networks', () => {
+    const result = auditAccountSnapshotConsistency([
+      snapshotInput(sourceId, {}, { network: 'testnet' }),
+      snapshotInput(sourceId, {}, { network: 'public' }),
+    ]);
+    expect(result.comparable).toBe(false);
+    expect(result.findings.map((finding) => finding.code)).toContain('network-mismatch');
+  });
+
+  it('detects changes in balances, sequence, signers and thresholds', () => {
+    const customSigner = Keypair.random().publicKey();
+    const result = auditAccountSnapshotConsistency([
+      snapshotInput(sourceId),
+      snapshotInput(
+        sourceId,
+        {
+          sequence: '200',
+          balances: [
+            {
+              asset_type: 'native',
+              balance: '250.0000000',
+              selling_liabilities: '0.0000000',
+              buying_liabilities: '0.0000000',
+            },
+          ],
+          signers: [
+            { key: sourceId, weight: 1, type: 'ed25519_public_key' },
+            { key: customSigner, weight: 1, type: 'ed25519_public_key' },
+          ],
+          thresholds: { low_threshold: 2, med_threshold: 2, high_threshold: 2 },
+        },
+        { ledgerSequence: 1001, ledgerHash: 'def456' },
+      ),
+    ]);
+    const fields = result.fieldDifferences.map((diff) => diff.field);
+    expect(fields).toEqual(
+      expect.arrayContaining(['sequence', 'balances', 'signers', 'thresholds']),
+    );
+    expect(result.consistent).toBe(true);
+  });
+
+  it('detects home domain changes', () => {
+    const result = auditAccountSnapshotConsistency([
+      snapshotInput(sourceId),
+      snapshotInput(sourceId, { home_domain: 'other.test' }, { ledgerSequence: 1001 }),
+    ]);
+    expect(result.fieldDifferences.map((diff) => diff.field)).toContain('home_domain');
+  });
+
+  it('does not classify legitimate cross-ledger changes as corruption', () => {
+    const result = auditAccountSnapshotConsistency([
+      snapshotInput(sourceId),
+      snapshotInput(
+        sourceId,
+        { sequence: '200', balances: [{ asset_type: 'native', balance: '250.0000000' }] },
+        { ledgerSequence: 1001, ledgerHash: 'def456' },
+      ),
+    ]);
+    expect(result.consistent).toBe(true);
+    expect(result.findings.map((finding) => finding.code)).not.toContain('contradiction');
+  });
+
+  it('flags contradictions when snapshots claim the same ledger state but differ', () => {
+    const result = auditAccountSnapshotConsistency([
+      snapshotInput(sourceId),
+      snapshotInput(sourceId, { sequence: '200' }),
+    ]);
+    expect(result.consistent).toBe(false);
+    expect(result.findings.map((finding) => finding.code)).toContain('contradiction');
+  });
+
+  it('identifies incomplete snapshots and fields that cannot be compared', () => {
+    const result = auditAccountSnapshotConsistency([
+      snapshotInput(sourceId),
+      snapshotInput(sourceId, { thresholds: undefined, home_domain: undefined }),
+    ]);
+    expect(result.findings.map((finding) => finding.code)).toContain('incomplete-snapshot');
+    expect(result.incomparableFields).toEqual(
+      expect.arrayContaining(['thresholds', 'home_domain']),
+    );
+  });
+
+  it('handles incompatible field representations without crashing', () => {
+    const result = auditAccountSnapshotConsistency([
+      snapshotInput(sourceId),
+      snapshotInput(sourceId, { balances: 'not-an-array' }),
+    ]);
+    expect(result.findings.map((finding) => finding.code)).toContain('incompatible-field');
+    expect(result.consistent).toBe(false);
+  });
+
+  it('does not treat differing retrieval timestamps as inconsistency', () => {
+    const result = auditAccountSnapshotConsistency([
+      snapshotInput(sourceId, {}, { retrievedAt: '2024-01-01T00:00:00.000Z' }),
+      snapshotInput(sourceId, {}, { retrievedAt: '2024-06-01T00:00:00.000Z' }),
+    ]);
+    expect(result.consistent).toBe(true);
+    expect(result.findings.map((finding) => finding.code)).not.toContain('timestamp-mismatch');
+  });
+
+  it('produces readable terminal output and JSON serialization', () => {
+    const result = auditAccountSnapshotConsistency([
+      snapshotInput(sourceId),
+      snapshotInput(sourceId, { sequence: '200' }, { ledgerSequence: 1001 }),
+    ]);
+    const text = formatAccountSnapshotConsistencyAudit(result);
+    expect(text).toContain('Ledger Context:');
+    expect(text).toContain('--- Field Differences ---');
+    expect(text).toContain('--- Findings ---');
+    const json = JSON.parse(JSON.stringify(result));
+    expect(json.snapshots).toHaveLength(2);
+    expect(json.ledgerContext).toBeDefined();
+    expect(json.fieldDifferences).toBeDefined();
+    expect(json.consistent).toBeDefined();
+  });
+
+  it('does not claim cryptographic proof of authenticity', () => {
+    const result = auditAccountSnapshotConsistency([
+      snapshotInput(sourceId),
+      snapshotInput(sourceId),
+    ]);
+    expect(result.authenticityVerified).toBe(false);
+    expect(result.findings.map((finding) => finding.code)).not.toContain('authenticity-verified');
+  });
+
+  it('regression: existing account inspection remains backward compatible', async () => {
+    mockHorizon();
+    const result = await auditAccountMerge(horizonUrl, sourceId, destinationId);
+    expect(result.status).toBe('ready');
+    expect(result.sourceAccount.readable).toBe(true);
+    expect(result.readOnly).toBe(true);
   });
 });

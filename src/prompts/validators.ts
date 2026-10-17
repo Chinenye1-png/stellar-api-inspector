@@ -1,7 +1,8 @@
 import { StrKey } from '@stellar/stellar-sdk';
+import { existsSync, statSync } from 'fs';
 import { validateHorizonUrl } from '../utils/urls';
 import { validateSorobanUrl } from '../inspectors/soroban';
-import { existsSync, statSync } from 'fs';
+import { existsSync, statSync, accessSync, constants } from 'fs';
 
 export function validateNonEmpty(value: string): true | string {
   return value.trim().length > 0 || 'Value is required';
@@ -30,94 +31,45 @@ export function validatePositiveInteger(value: string): true | string {
   return (Number.isInteger(parsed) && parsed > 0) || 'Enter a positive integer';
 }
 
-const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
-
-export function validateTransactionEnvelopeXdr(value: string): true | string {
+export function validateTransactionHash(value: string): true | string {
   const trimmed = value.trim();
   if (trimmed.length === 0) {
-    return 'Transaction envelope XDR is required';
+    return 'Transaction hash is required';
   }
-  if (trimmed.length % 4 !== 0) {
-    return 'Invalid base64: length must be a multiple of 4';
-  }
-  if (!BASE64_PATTERN.test(trimmed)) {
-    return 'Invalid base64 transaction envelope XDR';
-  }
-  try {
-    const decoded = Buffer.from(trimmed, 'base64');
-    if (decoded.length === 0) {
-      return 'Transaction envelope XDR decodes to empty data';
-    }
-  } catch {
-    return 'Invalid base64 transaction envelope XDR';
-  }
-  return true;
+  return /^[0-9a-fA-F]{64}$/.test(trimmed) || 'Invalid transaction hash (expected 64 hex characters)';
 }
 
-const KNOWN_NETWORK_ALIASES = new Set([
-  'public',
-  'mainnet',
-  'pubnet',
-  'testnet',
-  'test',
-  'futurenet',
-  'standalone',
-  'local',
-]);
-
-export function validateNetworkPassphrase(value: string): true | string {
+function validateReadableFilePath(value: string, label: string): true | string {
   const trimmed = value.trim();
   if (trimmed.length === 0) {
-    return 'Network passphrase or alias is required';
-  }
-  if (KNOWN_NETWORK_ALIASES.has(trimmed.toLowerCase())) {
-    return true;
-  }
-  if (trimmed.length < 4) {
-    return 'Network passphrase is too short';
-  }
-  return true;
-}
-
-export function validateBoundedRange(value: string): true | string {
-  const trimmed = value.trim();
-  if (trimmed.length === 0) {
-    return 'Range is required';
-  }
-  const parts = trimmed.split(/[.:\-–]/).map((p) => p.trim());
-  if (parts.length !== 2 || parts.some((p) => p.length === 0)) {
-    return 'Range must be in the form <start>..<end>';
-  }
-  const [startRaw, endRaw] = parts;
-  const start = Number.parseInt(startRaw, 10);
-  const end = Number.parseInt(endRaw, 10);
-  if (!Number.isInteger(start) || !Number.isInteger(end)) {
-    return 'Range bounds must be integers';
-  }
-  if (start < 0 || end < 0) {
-    return 'Range bounds must not be negative';
-  }
-  if (start > end) {
-    return 'Range start must not exceed range end';
-  }
-  return true;
-}
-
-export function validateJsonFilePath(value: string): true | string {
-  const trimmed = value.trim();
-  if (trimmed.length === 0) {
-    return 'File path is required';
+    return `${label} path is required`;
   }
   if (!existsSync(trimmed)) {
-    return `File not found: ${trimmed}`;
+    return `${label} file does not exist: ${trimmed}`;
   }
   try {
-    const stats = statSync(trimmed);
-    if (!stats.isFile()) {
-      return 'Path does not point to a readable file';
+    if (!statSync(trimmed).isFile()) {
+      return `${label} path is not a file: ${trimmed}`;
     }
   } catch {
-    return 'Path is not readable';
+    return `Unable to read ${label.toLowerCase()} file: ${trimmed}`;
+  }
+  try {
+    accessSync(trimmed, constants.R_OK);
+  } catch {
+    return `${label} file is not readable: ${trimmed}`;
   }
   return true;
+}
+
+export function validateSnapshotFilePath(value: string): true | string {
+  return validateReadableFilePath(value, 'Snapshot');
+}
+
+export function validateEventQueryFilePath(value: string): true | string {
+  return validateReadableFilePath(value, 'Event query');
+}
+
+export function validateMemoPrivacyRulesFilePath(value: string): true | string {
+  return validateReadableFilePath(value, 'Memo privacy rules');
 }

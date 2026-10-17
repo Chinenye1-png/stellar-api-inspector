@@ -155,55 +155,120 @@ export function formatFeeStatsRows(stats: {
   ];
 }
 
-/**
- * Severity labels shared by the audit report formatters below. Kept as a
- * small helper so each report renders severities consistently.
- */
-function formatSeverity(severity: string): string {
-  const normalized = severity.toLowerCase();
-  switch (normalized) {
-    case 'error':
-    case 'critical':
-    case 'high':
-      return chalk.red(severity);
-    case 'warning':
-    case 'warn':
-    case 'medium':
-      return chalk.yellow(severity);
-    case 'info':
-    case 'low':
-      return chalk.blue(severity);
-    case 'pass':
-    case 'ok':
-    case 'success':
-      return chalk.green(severity);
-    default:
-      return severity;
+const UNKNOWN_VALUE = 'Unknown';
+
+function displayValue(value: unknown): string {
+  if (value === undefined || value === null || value === '') return UNKNOWN_VALUE;
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
   }
 }
 
 /**
- * Render a list of findings as a table. Each finding may carry a severity,
- * a field/rule identifier, and a message. Used by the SEP-10 challenge audit
- * and the Horizon response consistency audit.
+ * Format the ledger context of a set of account snapshots so users can see
+ * whether the snapshots were captured at the same ledger, different ledgers,
+ * or without enough metadata to establish a comparison context.
  */
-export function formatFindingRows(
-  findings: Array<{
-    severity?: string;
-    field?: string;
-    rule?: string;
-    message: string;
-  }>,
+export function formatAccountSnapshotLedgerContextRows(context: {
+  status: string;
+  ledgerSequences?: Array<number | string | null | undefined>;
+  ledgerHashes?: Array<string | null | undefined>;
+  retrievalTimestamps?: Array<string | null | undefined>;
+  lastModifiedLedgers?: Array<number | string | null | undefined>;
+  notes?: string[];
+}): string[][] {
+  const rows: string[][] = [['Field', 'Value']];
+  rows.push(['Comparison Context', displayValue(context.status)]);
+  rows.push([
+    'Ledger Sequences',
+    context.ledgerSequences && context.ledgerSequences.length > 0
+      ? context.ledgerSequences.map((seq) => displayValue(seq)).join(', ')
+      : UNKNOWN_VALUE,
+  ]);
+  rows.push([
+    'Ledger Hashes',
+    context.ledgerHashes && context.ledgerHashes.length > 0
+      ? context.ledgerHashes.map((hash) => displayValue(hash)).join(', ')
+      : UNKNOWN_VALUE,
+  ]);
+  rows.push([
+    'Last Modified Ledgers',
+    context.lastModifiedLedgers && context.lastModifiedLedgers.length > 0
+      ? context.lastModifiedLedgers.map((ledger) => displayValue(ledger)).join(', ')
+      : UNKNOWN_VALUE,
+  ]);
+  rows.push([
+    'Retrieval Timestamps',
+    context.retrievalTimestamps && context.retrievalTimestamps.length > 0
+      ? context.retrievalTimestamps.map((ts) => displayValue(ts)).join(', ')
+      : UNKNOWN_VALUE,
+  ]);
+  if (context.notes && context.notes.length > 0) {
+    rows.push(['Notes', context.notes.join('; ')]);
+  }
+  return rows;
+}
+
+/**
+ * Format field-level differences between account snapshots, preserving the
+ * original values and the source snapshot identifiers for each value.
+ */
+export function formatAccountSnapshotDifferenceRows(
+  differences: Array<{
+    field: string;
+    values: Array<{ snapshot: string; value: unknown }>;
+    classification?: string;
+    note?: string;
+  }>
 ): string[][] {
-  const rows: string[][] = [['Severity', 'Field / Rule', 'Finding']];
+  const rows: string[][] = [['Field', 'Snapshot', 'Value', 'Classification', 'Note']];
+  if (differences.length === 0) {
+    rows.push(['No differences', '-', '-', '-', '-']);
+    return rows;
+  }
+  for (const diff of differences) {
+    if (diff.values.length === 0) {
+      rows.push([
+        diff.field,
+        UNKNOWN_VALUE,
+        UNKNOWN_VALUE,
+        displayValue(diff.classification),
+        displayValue(diff.note),
+      ]);
+      continue;
+    }
+    diff.values.forEach((entry, index) => {
+      rows.push([
+        index === 0 ? diff.field : '',
+        displayValue(entry.snapshot),
+        displayValue(entry.value),
+        index === 0 ? displayValue(diff.classification) : '',
+        index === 0 ? displayValue(diff.note) : '',
+      ]);
+    });
+  }
+  return rows;
+}
+
+/**
+ * Format the consistency findings produced by the account snapshot audit.
+ */
+export function formatAccountSnapshotFindingsRows(
+  findings: Array<{ severity?: string; code?: string; message: string }>
+): string[][] {
+  const rows: string[][] = [['Severity', 'Code', 'Finding']];
   if (findings.length === 0) {
-    rows.push(['pass', '-', 'No findings']);
+    rows.push(['info', '-', 'No consistency findings reported']);
     return rows;
   }
   for (const finding of findings) {
     rows.push([
-      finding.severity ? formatSeverity(finding.severity) : 'info',
-      finding.field ?? finding.rule ?? '-',
+      displayValue(finding.severity ?? 'info'),
+      displayValue(finding.code),
       finding.message,
     ]);
   }
@@ -211,301 +276,220 @@ export function formatFindingRows(
 }
 
 /**
- * SEP-10 challenge transaction security audit report.
- *
- * Structural validation, signature verification, time-bound findings and
- * overall eligibility are reported separately so a decoded envelope or a
- * valid signature is never presented as complete authentication success.
+ * Format the reference metadata for the payment reference audit.
  */
-export function formatSep10ChallengeAuditRows(audit: {
-  serverAccount: string;
-  clientAccount: string;
-  networkPassphrase?: string;
-  structure: {
-    sourceAccount?: string;
-    sequenceNumber?: string;
-    memo?: string;
-    operationCount?: number;
-    findings: Array<{ severity?: string; field?: string; rule?: string; message: string }>;
-  };
-  signatures: {
-    serverSignature?: string;
-    clientSignature?: string;
-    findings: Array<{ severity?: string; field?: string; rule?: string; message: string }>;
-  };
-  timeBounds: {
-    minTime?: string | number;
-    maxTime?: string | number;
-    findings: Array<{ severity?: string; field?: string; rule?: string; message: string }>;
-  };
-  eligibility: string;
-  limitations: string[];
+export function formatPaymentReferenceRows(reference: {
+  type: string;
+  value: string;
+  valid?: boolean;
+  validationMessage?: string;
 }): string[][] {
-  const rows: string[][] = [['Field', 'Value']];
-  rows.push(['Server Account', audit.serverAccount]);
-  rows.push(['Client Account', audit.clientAccount]);
-  rows.push(['Network Passphrase', audit.networkPassphrase ?? 'Unknown']);
-  rows.push(['Transaction Source', audit.structure.sourceAccount ?? 'Unknown']);
-  rows.push(['Sequence Number', audit.structure.sequenceNumber ?? 'Unknown']);
-  rows.push(['Memo', audit.structure.memo ?? 'None']);
-  rows.push([
-    'Operation Count',
-    audit.structure.operationCount !== undefined ? String(audit.structure.operationCount) : 'Unknown',
-  ]);
-  rows.push(['Server Signature', audit.signatures.serverSignature ?? 'Not verified']);
-  rows.push(['Client Signature', audit.signatures.clientSignature ?? 'Not verified']);
-  rows.push(['Time Bounds (min)', audit.timeBounds.minTime ?? 'None']);
-  rows.push(['Time Bounds (max)', audit.timeBounds.maxTime ?? 'None']);
-  rows.push(['Challenge Eligibility', audit.eligibility]);
-  rows.push([
-    'Validation Limitations',
-    audit.limitations.length > 0 ? audit.limitations.join('; ') : 'None reported',
-  ]);
-  return rows;
+  return [
+    ['Field', 'Value'],
+    ['Reference Type', displayValue(reference.type)],
+    ['Reference Value', displayValue(reference.value)],
+    ['Format Valid', reference.valid === undefined ? UNKNOWN_VALUE : String(reference.valid)],
+    ['Validation', displayValue(reference.validationMessage)],
+  ];
 }
 
 /**
- * SEP-10 challenge audit section tables: structure, signatures and time
- * bounds are each rendered as their own findings table.
+ * Format the search constraints applied during the payment reference audit.
  */
-export function formatSep10ChallengeAuditSections(audit: {
-  structure: { findings: Array<{ severity?: string; field?: string; rule?: string; message: string }> };
-  signatures: { findings: Array<{ severity?: string; field?: string; rule?: string; message: string }> };
-  timeBounds: { findings: Array<{ severity?: string; field?: string; rule?: string; message: string }> };
-}): {
-  structure: string[][];
-  signatures: string[][];
-  timeBounds: string[][];
-} {
-  return {
-    structure: formatFindingRows(audit.structure.findings),
-    signatures: formatFindingRows(audit.signatures.findings),
-    timeBounds: formatFindingRows(audit.timeBounds.findings),
-  };
-}
-
-/**
- * Account payment flow analysis report. Incoming and outgoing activity is
- * grouped by counterparty and asset identity (code + issuer). Transaction
- * and operation counts are reported separately to avoid double counting.
- */
-export function formatPaymentFlowRows(flow: {
-  account: string;
-  range?: { from?: string | number; to?: string | number };
-  incoming: Array<{
-    counterparty: string;
-    asset: string;
-    transactionCount: number;
-    operationCount: number;
-    total: string;
-  }>;
-  outgoing: Array<{
-    counterparty: string;
-    asset: string;
-    transactionCount: number;
-    operationCount: number;
-    total: string;
-  }>;
-  operationTypes?: Array<{ type: string; count: number }>;
-  failedTransactions?: { count: number; note?: string };
-  limitations: string[];
-}): string[][] {
-  const rows: string[][] = [['Field', 'Value']];
-  rows.push(['Account', flow.account]);
-  rows.push(['Range From', flow.range?.from ?? 'Unbounded']);
-  rows.push(['Range To', flow.range?.to ?? 'Unbounded']);
-  rows.push(['Incoming Groups', String(flow.incoming.length)]);
-  rows.push(['Outgoing Groups', String(flow.outgoing.length)]);
-  rows.push([
-    'Failed Transactions',
-    flow.failedTransactions
-      ? `${flow.failedTransactions.count}${flow.failedTransactions.note ? ` (${flow.failedTransactions.note})` : ''}`
-      : 'None reported',
-  ]);
-  rows.push([
-    'Retrieval Limitations',
-    flow.limitations.length > 0 ? flow.limitations.join('; ') : 'None reported',
-  ]);
-  return rows;
-}
-
-/**
- * Payment flow direction tables, rendered separately for incoming and
- * outgoing activity. Each row is a counterparty/asset group.
- */
-export function formatPaymentFlowDirectionRows(
-  groups: Array<{
-    counterparty: string;
-    asset: string;
-    transactionCount: number;
-    operationCount: number;
-    total: string;
-  }>,
+export function formatPaymentReferenceConstraintRows(
+  constraints: Array<{ name: string; value: unknown }>
 ): string[][] {
-  const rows: string[][] = [['Counterparty', 'Asset', 'Transactions', 'Operations', 'Total']];
-  if (groups.length === 0) {
-    rows.push(['-', '-', '0', '0', '0']);
+  const rows: string[][] = [['Constraint', 'Value']];
+  if (constraints.length === 0) {
+    rows.push(['Constraints', 'None supplied']);
     return rows;
   }
-  for (const group of groups) {
+  for (const constraint of constraints) {
+    rows.push([constraint.name, displayValue(constraint.value)]);
+  }
+  return rows;
+}
+
+/**
+ * Format matched transaction/operation records for the payment reference audit.
+ */
+export function formatPaymentReferenceMatchRows(
+  matches: Array<{
+    matchType: string;
+    transactionHash?: string;
+    ledger?: number | string;
+    timestamp?: string;
+    sourceAccount?: string;
+    destination?: string;
+    asset?: string;
+    amount?: string;
+    status?: string;
+  }>
+): string[][] {
+  const rows: string[][] = [
+    ['Match Type', 'Transaction Hash', 'Ledger', 'Timestamp', 'Source', 'Destination', 'Asset', 'Amount', 'Status'],
+  ];
+  if (matches.length === 0) {
+    rows.push(['No matches', '-', '-', '-', '-', '-', '-', '-', '-']);
+    return rows;
+  }
+  for (const match of matches) {
     rows.push([
-      group.counterparty,
-      group.asset,
-      String(group.transactionCount),
-      String(group.operationCount),
-      group.total,
+      displayValue(match.matchType),
+      displayValue(match.transactionHash),
+      displayValue(match.ledger),
+      displayValue(match.timestamp),
+      displayValue(match.sourceAccount),
+      displayValue(match.destination),
+      displayValue(match.asset),
+      displayValue(match.amount),
+      displayValue(match.status),
     ]);
   }
   return rows;
 }
 
 /**
- * Payment flow operation-type breakdown table.
+ * Format ambiguity status and search coverage limitations for the payment
+ * reference audit.
  */
-export function formatPaymentFlowOperationTypeRows(
-  operationTypes: Array<{ type: string; count: number }>,
-): string[][] {
-  const rows: string[][] = [['Operation Type', 'Count']];
-  if (operationTypes.length === 0) {
-    rows.push(['-', '0']);
-    return rows;
-  }
-  for (const entry of operationTypes) {
-    rows.push([entry.type, String(entry.count)]);
-  }
-  return rows;
-}
-
-/**
- * Soroban contract event retention and pagination audit report. Summarizes
- * query context, observed ledger bounds, page status and completeness
- * limitations without asserting that missing events did not occur.
- */
-export function formatSorobanEventRetentionRows(audit: {
-  query?: {
-    contractId?: string;
-    topics?: string[];
-    fromLedger?: number | string;
-    toLedger?: number | string;
-  };
-  observedLedgerBounds?: { min?: number | string; max?: number | string };
-  pageStatus: {
-    pageCount: number;
-    exhausted?: boolean;
-    terminationReason?: string;
-  };
-  eventCount: number;
-  duplicateFindings: Array<{ severity?: string; field?: string; rule?: string; message: string }>;
-  cursorFindings: Array<{ severity?: string; field?: string; rule?: string; message: string }>;
-  limitations: string[];
-}): string[][] {
-  const rows: string[][] = [['Field', 'Value']];
-  rows.push(['Contract ID', audit.query?.contractId ?? 'Unknown']);
-  rows.push([
-    'Topics',
-    audit.query?.topics && audit.query.topics.length > 0 ? audit.query.topics.join(', ') : 'None',
-  ]);
-  rows.push(['From Ledger', audit.query?.fromLedger ?? 'Unbounded']);
-  rows.push(['To Ledger', audit.query?.toLedger ?? 'Unbounded']);
-  rows.push(['Observed Min Ledger', audit.observedLedgerBounds?.min ?? 'Unknown']);
-  rows.push(['Observed Max Ledger', audit.observedLedgerBounds?.max ?? 'Unknown']);
-  rows.push(['Page Count', String(audit.pageStatus.pageCount)]);
-  rows.push([
-    'Retrieval Exhausted',
-    audit.pageStatus.exhausted === undefined ? 'Unknown' : String(audit.pageStatus.exhausted),
-  ]);
-  rows.push(['Termination Reason', audit.pageStatus.terminationReason ?? 'Unknown']);
-  rows.push(['Event Count', String(audit.eventCount)]);
-  rows.push(['Duplicate Findings', String(audit.duplicateFindings.length)]);
-  rows.push(['Cursor Findings', String(audit.cursorFindings.length)]);
-  rows.push([
-    'Completeness Limitations',
-    audit.limitations.length > 0 ? audit.limitations.join('; ') : 'None reported',
-  ]);
-  return rows;
-}
-
-/**
- * Soroban event retention findings tables (duplicates and cursor issues).
- */
-export function formatSorobanEventRetentionSections(audit: {
-  duplicateFindings: Array<{ severity?: string; field?: string; rule?: string; message: string }>;
-  cursorFindings: Array<{ severity?: string; field?: string; rule?: string; message: string }>;
-}): {
-  duplicates: string[][];
-  cursors: string[][];
-} {
-  return {
-    duplicates: formatFindingRows(audit.duplicateFindings),
-    cursors: formatFindingRows(audit.cursorFindings),
-  };
-}
-
-/**
- * Horizon transaction response consistency audit report. Separates
- * structural consistency checks from cryptographic verification and server
- * authenticity, and reports input metadata alongside the overall status.
- */
-export function formatTransactionConsistencyRows(audit: {
-  overallStatus: string;
-  input?: {
-    source?: string;
-    transactionHash?: string;
-    networkPassphrase?: string;
-    horizonVersion?: string;
-  };
-  findings: Array<{
-    severity?: string;
-    field?: string;
-    rule?: string;
-    message: string;
-    expected?: string;
-    observed?: string;
-  }>;
+export function formatPaymentReferenceCoverageRows(coverage: {
+  ambiguous: boolean;
+  matchCount: number;
+  complete?: boolean;
   limitations?: string[];
 }): string[][] {
   const rows: string[][] = [['Field', 'Value']];
-  rows.push(['Overall Status', formatSeverity(audit.overallStatus)]);
-  rows.push(['Input Source', audit.input?.source ?? 'Unknown']);
-  rows.push(['Transaction Hash', audit.input?.transactionHash ?? 'Unknown']);
-  rows.push(['Network Passphrase', audit.input?.networkPassphrase ?? 'Unknown']);
-  rows.push(['Horizon Version', audit.input?.horizonVersion ?? 'Unknown']);
-  rows.push(['Finding Count', String(audit.findings.length)]);
+  rows.push(['Ambiguous Reference', String(coverage.ambiguous)]);
+  rows.push(['Match Count', String(coverage.matchCount)]);
+  rows.push([
+    'Search Coverage Complete',
+    coverage.complete === undefined ? UNKNOWN_VALUE : String(coverage.complete),
+  ]);
   rows.push([
     'Limitations',
-    audit.limitations && audit.limitations.length > 0 ? audit.limitations.join('; ') : 'None reported',
+    coverage.limitations && coverage.limitations.length > 0
+      ? coverage.limitations.join('; ')
+      : 'None reported',
   ]);
   return rows;
 }
 
 /**
- * Horizon transaction response consistency findings table. Includes the
- * responsible field, severity, message and expected/observed values where
- * a comparison was possible.
+ * Format the validation status and field-level findings for a Soroban event
+ * query configuration.
  */
-export function formatTransactionConsistencyFindingRows(
+export function formatSorobanEventQueryValidationRows(validation: {
+  status: string;
   findings: Array<{
+    field: string;
     severity?: string;
-    field?: string;
-    rule?: string;
     message: string;
-    expected?: string;
-    observed?: string;
-  }>,
+    required?: boolean;
+  }>;
+}): string[][] {
+  const rows: string[][] = [['Field', 'Severity', 'Required', 'Finding']];
+  rows.push(['Validation Status', 'info', '-', displayValue(validation.status)]);
+  if (validation.findings.length === 0) {
+    rows.push(['No findings', 'info', '-', 'No field-level findings reported']);
+    return rows;
+  }
+  for (const finding of validation.findings) {
+    rows.push([
+      displayValue(finding.field),
+      displayValue(finding.severity ?? 'info'),
+      finding.required === undefined ? UNKNOWN_VALUE : String(finding.required),
+      finding.message,
+    ]);
+  }
+  return rows;
+}
+
+/**
+ * Format endpoint compatibility results for a Soroban event query, kept
+ * separate from local schema validation.
+ */
+export function formatSorobanEventQueryEndpointRows(endpoint: {
+  checked: boolean;
+  url?: string;
+  compatible?: boolean;
+  message?: string;
+}): string[][] {
+  const rows: string[][] = [['Field', 'Value']];
+  rows.push(['Endpoint Checked', String(endpoint.checked)]);
+  rows.push(['Endpoint URL', displayValue(endpoint.url)]);
+  rows.push([
+    'Endpoint Compatible',
+    endpoint.compatible === undefined ? UNKNOWN_VALUE : String(endpoint.compatible),
+  ]);
+  rows.push(['Endpoint Message', displayValue(endpoint.message)]);
+  return rows;
+}
+
+/**
+ * Format the memo metadata and redacted privacy findings for the memo privacy
+ * audit. Memo content is redacted by default; only metadata is shown.
+ */
+export function formatMemoPrivacyRows(memo: {
+  type: string;
+  byteLength?: number;
+  redacted?: boolean;
+  displayedValue?: string;
+}): string[][] {
+  const rows: string[][] = [['Field', 'Value']];
+  rows.push(['Memo Type', displayValue(memo.type)]);
+  rows.push([
+    'Byte Length',
+    memo.byteLength === undefined ? UNKNOWN_VALUE : String(memo.byteLength),
+  ]);
+  rows.push(['Redacted', memo.redacted === undefined ? UNKNOWN_VALUE : String(memo.redacted)]);
+  rows.push([
+    'Memo Value',
+    memo.displayedValue !== undefined ? memo.displayedValue : '[redacted]',
+  ]);
+  return rows;
+}
+
+/**
+ * Format privacy findings for the memo privacy audit. Findings are warnings
+ * requiring review, not proof of sensitive data.
+ */
+export function formatMemoPrivacyFindingRows(
+  findings: Array<{
+    rule: string;
+    severity?: string;
+    message: string;
+    redacted?: boolean;
+  }>
 ): string[][] {
-  const rows: string[][] = [['Severity', 'Field / Rule', 'Expected', 'Observed', 'Finding']];
+  const rows: string[][] = [['Rule', 'Severity', 'Redacted', 'Finding']];
   if (findings.length === 0) {
-    rows.push(['pass', '-', '-', '-', 'No findings']);
+    rows.push(['No findings', 'info', '-', 'No privacy findings reported']);
     return rows;
   }
   for (const finding of findings) {
     rows.push([
-      finding.severity ? formatSeverity(finding.severity) : 'info',
-      finding.field ?? finding.rule ?? '-',
-      finding.expected ?? '-',
-      finding.observed ?? '-',
+      displayValue(finding.rule),
+      displayValue(finding.severity ?? 'warning'),
+      finding.redacted === undefined ? UNKNOWN_VALUE : String(finding.redacted),
       finding.message,
     ]);
+  }
+  return rows;
+}
+
+/**
+ * Format general warnings (e.g. public visibility of transaction data) for the
+ * memo privacy audit.
+ */
+export function formatMemoPrivacyWarningRows(warnings: string[]): string[][] {
+  const rows: string[][] = [['Warning']];
+  if (warnings.length === 0) {
+    rows.push(['No warnings']);
+    return rows;
+  }
+  for (const warning of warnings) {
+    rows.push([warning]);
   }
   return rows;
 }

@@ -154,3 +154,342 @@ export function formatFeeStatsRows(stats: {
     ['Maximum Fee', `${stats.fee_charged.max} stroops`],
   ];
 }
+
+const UNKNOWN_VALUE = 'Unknown';
+
+function displayValue(value: unknown): string {
+  if (value === undefined || value === null || value === '') return UNKNOWN_VALUE;
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/**
+ * Format the ledger context of a set of account snapshots so users can see
+ * whether the snapshots were captured at the same ledger, different ledgers,
+ * or without enough metadata to establish a comparison context.
+ */
+export function formatAccountSnapshotLedgerContextRows(context: {
+  status: string;
+  ledgerSequences?: Array<number | string | null | undefined>;
+  ledgerHashes?: Array<string | null | undefined>;
+  retrievalTimestamps?: Array<string | null | undefined>;
+  lastModifiedLedgers?: Array<number | string | null | undefined>;
+  notes?: string[];
+}): string[][] {
+  const rows: string[][] = [['Field', 'Value']];
+  rows.push(['Comparison Context', displayValue(context.status)]);
+  rows.push([
+    'Ledger Sequences',
+    context.ledgerSequences && context.ledgerSequences.length > 0
+      ? context.ledgerSequences.map((seq) => displayValue(seq)).join(', ')
+      : UNKNOWN_VALUE,
+  ]);
+  rows.push([
+    'Ledger Hashes',
+    context.ledgerHashes && context.ledgerHashes.length > 0
+      ? context.ledgerHashes.map((hash) => displayValue(hash)).join(', ')
+      : UNKNOWN_VALUE,
+  ]);
+  rows.push([
+    'Last Modified Ledgers',
+    context.lastModifiedLedgers && context.lastModifiedLedgers.length > 0
+      ? context.lastModifiedLedgers.map((ledger) => displayValue(ledger)).join(', ')
+      : UNKNOWN_VALUE,
+  ]);
+  rows.push([
+    'Retrieval Timestamps',
+    context.retrievalTimestamps && context.retrievalTimestamps.length > 0
+      ? context.retrievalTimestamps.map((ts) => displayValue(ts)).join(', ')
+      : UNKNOWN_VALUE,
+  ]);
+  if (context.notes && context.notes.length > 0) {
+    rows.push(['Notes', context.notes.join('; ')]);
+  }
+  return rows;
+}
+
+/**
+ * Format field-level differences between account snapshots, preserving the
+ * original values and the source snapshot identifiers for each value.
+ */
+export function formatAccountSnapshotDifferenceRows(
+  differences: Array<{
+    field: string;
+    values: Array<{ snapshot: string; value: unknown }>;
+    classification?: string;
+    note?: string;
+  }>
+): string[][] {
+  const rows: string[][] = [['Field', 'Snapshot', 'Value', 'Classification', 'Note']];
+  if (differences.length === 0) {
+    rows.push(['No differences', '-', '-', '-', '-']);
+    return rows;
+  }
+  for (const diff of differences) {
+    if (diff.values.length === 0) {
+      rows.push([
+        diff.field,
+        UNKNOWN_VALUE,
+        UNKNOWN_VALUE,
+        displayValue(diff.classification),
+        displayValue(diff.note),
+      ]);
+      continue;
+    }
+    diff.values.forEach((entry, index) => {
+      rows.push([
+        index === 0 ? diff.field : '',
+        displayValue(entry.snapshot),
+        displayValue(entry.value),
+        index === 0 ? displayValue(diff.classification) : '',
+        index === 0 ? displayValue(diff.note) : '',
+      ]);
+    });
+  }
+  return rows;
+}
+
+/**
+ * Format the consistency findings produced by the account snapshot audit.
+ */
+export function formatAccountSnapshotFindingsRows(
+  findings: Array<{ severity?: string; code?: string; message: string }>
+): string[][] {
+  const rows: string[][] = [['Severity', 'Code', 'Finding']];
+  if (findings.length === 0) {
+    rows.push(['info', '-', 'No consistency findings reported']);
+    return rows;
+  }
+  for (const finding of findings) {
+    rows.push([
+      displayValue(finding.severity ?? 'info'),
+      displayValue(finding.code),
+      finding.message,
+    ]);
+  }
+  return rows;
+}
+
+/**
+ * Format the reference metadata for the payment reference audit.
+ */
+export function formatPaymentReferenceRows(reference: {
+  type: string;
+  value: string;
+  valid?: boolean;
+  validationMessage?: string;
+}): string[][] {
+  return [
+    ['Field', 'Value'],
+    ['Reference Type', displayValue(reference.type)],
+    ['Reference Value', displayValue(reference.value)],
+    ['Format Valid', reference.valid === undefined ? UNKNOWN_VALUE : String(reference.valid)],
+    ['Validation', displayValue(reference.validationMessage)],
+  ];
+}
+
+/**
+ * Format the search constraints applied during the payment reference audit.
+ */
+export function formatPaymentReferenceConstraintRows(
+  constraints: Array<{ name: string; value: unknown }>
+): string[][] {
+  const rows: string[][] = [['Constraint', 'Value']];
+  if (constraints.length === 0) {
+    rows.push(['Constraints', 'None supplied']);
+    return rows;
+  }
+  for (const constraint of constraints) {
+    rows.push([constraint.name, displayValue(constraint.value)]);
+  }
+  return rows;
+}
+
+/**
+ * Format matched transaction/operation records for the payment reference audit.
+ */
+export function formatPaymentReferenceMatchRows(
+  matches: Array<{
+    matchType: string;
+    transactionHash?: string;
+    ledger?: number | string;
+    timestamp?: string;
+    sourceAccount?: string;
+    destination?: string;
+    asset?: string;
+    amount?: string;
+    status?: string;
+  }>
+): string[][] {
+  const rows: string[][] = [
+    ['Match Type', 'Transaction Hash', 'Ledger', 'Timestamp', 'Source', 'Destination', 'Asset', 'Amount', 'Status'],
+  ];
+  if (matches.length === 0) {
+    rows.push(['No matches', '-', '-', '-', '-', '-', '-', '-', '-']);
+    return rows;
+  }
+  for (const match of matches) {
+    rows.push([
+      displayValue(match.matchType),
+      displayValue(match.transactionHash),
+      displayValue(match.ledger),
+      displayValue(match.timestamp),
+      displayValue(match.sourceAccount),
+      displayValue(match.destination),
+      displayValue(match.asset),
+      displayValue(match.amount),
+      displayValue(match.status),
+    ]);
+  }
+  return rows;
+}
+
+/**
+ * Format ambiguity status and search coverage limitations for the payment
+ * reference audit.
+ */
+export function formatPaymentReferenceCoverageRows(coverage: {
+  ambiguous: boolean;
+  matchCount: number;
+  complete?: boolean;
+  limitations?: string[];
+}): string[][] {
+  const rows: string[][] = [['Field', 'Value']];
+  rows.push(['Ambiguous Reference', String(coverage.ambiguous)]);
+  rows.push(['Match Count', String(coverage.matchCount)]);
+  rows.push([
+    'Search Coverage Complete',
+    coverage.complete === undefined ? UNKNOWN_VALUE : String(coverage.complete),
+  ]);
+  rows.push([
+    'Limitations',
+    coverage.limitations && coverage.limitations.length > 0
+      ? coverage.limitations.join('; ')
+      : 'None reported',
+  ]);
+  return rows;
+}
+
+/**
+ * Format the validation status and field-level findings for a Soroban event
+ * query configuration.
+ */
+export function formatSorobanEventQueryValidationRows(validation: {
+  status: string;
+  findings: Array<{
+    field: string;
+    severity?: string;
+    message: string;
+    required?: boolean;
+  }>;
+}): string[][] {
+  const rows: string[][] = [['Field', 'Severity', 'Required', 'Finding']];
+  rows.push(['Validation Status', 'info', '-', displayValue(validation.status)]);
+  if (validation.findings.length === 0) {
+    rows.push(['No findings', 'info', '-', 'No field-level findings reported']);
+    return rows;
+  }
+  for (const finding of validation.findings) {
+    rows.push([
+      displayValue(finding.field),
+      displayValue(finding.severity ?? 'info'),
+      finding.required === undefined ? UNKNOWN_VALUE : String(finding.required),
+      finding.message,
+    ]);
+  }
+  return rows;
+}
+
+/**
+ * Format endpoint compatibility results for a Soroban event query, kept
+ * separate from local schema validation.
+ */
+export function formatSorobanEventQueryEndpointRows(endpoint: {
+  checked: boolean;
+  url?: string;
+  compatible?: boolean;
+  message?: string;
+}): string[][] {
+  const rows: string[][] = [['Field', 'Value']];
+  rows.push(['Endpoint Checked', String(endpoint.checked)]);
+  rows.push(['Endpoint URL', displayValue(endpoint.url)]);
+  rows.push([
+    'Endpoint Compatible',
+    endpoint.compatible === undefined ? UNKNOWN_VALUE : String(endpoint.compatible),
+  ]);
+  rows.push(['Endpoint Message', displayValue(endpoint.message)]);
+  return rows;
+}
+
+/**
+ * Format the memo metadata and redacted privacy findings for the memo privacy
+ * audit. Memo content is redacted by default; only metadata is shown.
+ */
+export function formatMemoPrivacyRows(memo: {
+  type: string;
+  byteLength?: number;
+  redacted?: boolean;
+  displayedValue?: string;
+}): string[][] {
+  const rows: string[][] = [['Field', 'Value']];
+  rows.push(['Memo Type', displayValue(memo.type)]);
+  rows.push([
+    'Byte Length',
+    memo.byteLength === undefined ? UNKNOWN_VALUE : String(memo.byteLength),
+  ]);
+  rows.push(['Redacted', memo.redacted === undefined ? UNKNOWN_VALUE : String(memo.redacted)]);
+  rows.push([
+    'Memo Value',
+    memo.displayedValue !== undefined ? memo.displayedValue : '[redacted]',
+  ]);
+  return rows;
+}
+
+/**
+ * Format privacy findings for the memo privacy audit. Findings are warnings
+ * requiring review, not proof of sensitive data.
+ */
+export function formatMemoPrivacyFindingRows(
+  findings: Array<{
+    rule: string;
+    severity?: string;
+    message: string;
+    redacted?: boolean;
+  }>
+): string[][] {
+  const rows: string[][] = [['Rule', 'Severity', 'Redacted', 'Finding']];
+  if (findings.length === 0) {
+    rows.push(['No findings', 'info', '-', 'No privacy findings reported']);
+    return rows;
+  }
+  for (const finding of findings) {
+    rows.push([
+      displayValue(finding.rule),
+      displayValue(finding.severity ?? 'warning'),
+      finding.redacted === undefined ? UNKNOWN_VALUE : String(finding.redacted),
+      finding.message,
+    ]);
+  }
+  return rows;
+}
+
+/**
+ * Format general warnings (e.g. public visibility of transaction data) for the
+ * memo privacy audit.
+ */
+export function formatMemoPrivacyWarningRows(warnings: string[]): string[][] {
+  const rows: string[][] = [['Warning']];
+  if (warnings.length === 0) {
+    rows.push(['No warnings']);
+    return rows;
+  }
+  for (const warning of warnings) {
+    rows.push([warning]);
+  }
+  return rows;
+}

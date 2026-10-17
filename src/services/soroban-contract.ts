@@ -6,6 +6,425 @@ import {
   validateContractId,
 } from '../utils/xdr';
 
+export type SorobanEventQueryValidationStatus = 'valid' | 'invalid' | 'warning';
+
+export type SorobanEventQueryFindingSeverity = 'error' | 'warning' | 'info';
+
+export interface SorobanEventQueryFinding {
+  path: string;
+  severity: SorobanEventQueryFindingSeverity;
+  message: string;
+  code: string;
+}
+
+export interface SorobanEventQueryTopicFilterResult {
+  index: number;
+  raw: unknown;
+  valid: boolean;
+  decoded?: string;
+  findings: SorobanEventQueryFinding[];
+}
+
+export interface SorobanEventQueryEndpointCompatibility {
+  endpoint: string;
+  checked: boolean;
+  compatible?: boolean;
+  message: string;
+}
+
+export interface SorobanEventQueryValidationResult {
+  status: SorobanEventQueryValidationStatus;
+  valid: boolean;
+  query: {
+    type?: string;
+    contractIds?: string[];
+    topics?: SorobanEventQueryTopicFilterResult[];
+    startLedger?: number;
+    endLedger?: number;
+  };
+  requiredParameters: string[];
+  optionalParameters: string[];
+  findings: SorobanEventQueryFinding[];
+  topicFilters: SorobanEventQueryTopicFilterResult[];
+  ledgerRange: {
+    startLedger?: number;
+    endLedger?: number;
+    valid: boolean;
+    reversed: boolean;
+  };
+  endpointCompatibility?: SorobanEventQueryEndpointCompatibility;
+  limitations: string[];
+}
+
+export interface SorobanEventQueryValidationOptions {
+  endpoint?: string;
+}
+
+const SUPPORTED_EVENT_TYPES = ['contract', 'system', 'diagnostic'];
+const REQUIRED_QUERY_PARAMETERS = ['type'];
+const OPTIONAL_QUERY_PARAMETERS = ['contractIds', 'topics', 'startLedger', 'endLedger'];
+
+const OFFLINE_LIMITATIONS = [
+  'Local validation checks query structure and filter syntax only.',
+  'A locally valid query does not guarantee that matching events exist.',
+  'A locally valid query does not guarantee that any RPC endpoint will accept it.',
+  'Historical coverage depends on the endpoint and its retained ledger range.',
+];
+
+export function validateSorobanEventQuery(
+  config: unknown,
+  options: SorobanEventQueryValidationOptions = {},
+): SorobanEventQueryValidationResult {
+  const findings: SorobanEventQueryFinding[] = [];
+  const topicFilters: SorobanEventQueryTopicFilterResult[] = [];
+
+  const result: SorobanEventQueryValidationResult = {
+    status: 'valid',
+    valid: true,
+    query: {},
+    requiredParameters: [...REQUIRED_QUERY_PARAMETERS],
+    optionalParameters: [...OPTIONAL_QUERY_PARAMETERS],
+    findings,
+    topicFilters,
+    ledgerRange: {
+      valid: true,
+      reversed: false,
+    },
+    limitations: [...OFFLINE_LIMITATIONS],
+  };
+
+  if (config === null || config === undefined || typeof config !== 'object' || Array.isArray(config)) {
+    findings.push({
+      path: '$',
+      severity: 'error',
+      code: 'invalid-config',
+      message: 'Event query configuration must be a JSON object.',
+    });
+    return finalizeResult(result);
+  }
+
+  const query = config as Record<string, unknown>;
+
+  const knownKeys = new Set([
+    ...REQUIRED_QUERY_PARAMETERS,
+    ...OPTIONAL_QUERY_PARAMETERS,
+  ]);
+  for (const key of Object.keys(query)) {
+    if (!knownKeys.has(key)) {
+      findings.push({
+        path: key,
+        severity: 'error',
+        code: 'unsupported-field',
+        message: `Unsupported event query field "${key}". Supported fields: ${[...knownKeys].join(', ')}.`,
+      });
+    }
+  }
+
+  // Required: type
+  if (query.type === undefined) {
+    findings.push({
+      path: 'type',
+      severity: 'error',
+      code: 'missing-required-field',
+      message: 'Missing required field "type".',
+    });
+  } else if (typeof query.type !== 'string') {
+    findings.push({
+      path: 'type',
+      severity: 'error',
+      code: 'malformed-value',
+      message: 'Field "type" must be a string.',
+    });
+  } else if (!SUPPORTED_EVENT_TYPES.includes(query.type)) {
+    findings.push({
+      path: 'type',
+      severity: 'error',
+      code: 'unsupported-event-type',
+      message: `Unsupported event type "${query.type}". Supported types: ${SUPPORTED_EVENT_TYPES.join(', ')}.`,
+    });
+  } else {
+    result.query.type = query.type;
+  }
+
+  // Optional: contractIds
+  if (query.contractIds !== undefined) {
+    if (!Array.isArray(query.contractIds)) {
+      findings.push({
+        path: 'contractIds',
+        severity: 'error',
+        code: 'malformed-value',
+        message: 'Field "contractIds" must be an array of contract identifier strings.',
+      });
+    } else {
+      const contractIds: string[] = [];
+      query.contractIds.forEach((contractId, index) => {
+        if (typeof contractId !== 'string') {
+          findings.push({
+            path: `contractIds[${index}]`,
+            severity: 'error',
+            code: 'malformed-value',
+            message: `Contract identifier at index ${index} must be a string.`,
+          });
+          return;
+        }
+        const validation = validateContractId(contractId);
+        if (!validation.valid) {
+          findings.push({
+            path: `contractIds[${index}]`,
+            severity: 'error',
+            code: 'invalid-contract-id',
+            message: validation.error ?? `Invalid contract identifier "${contractId}".`,
+          });
+          return;
+        }
+        contractIds.push(contractId);
+      });
+      result.query.contractIds = contractIds;
+    }
+  }
+
+  // Optional: topics
+  if (query.topics !== undefined) {
+    if (!Array.isArray(query.topics)) {
+      findings.push({
+        path: 'topics',
+        severity: 'error',
+        code: 'malformed-value',
+        message: 'Field "topics" must be an array of topic filter entries.',
+      });
+    } else {
+      query.topics.forEach((topic, index) => {
+        const topicResult = validateTopicFilter(topic, index);
+        topicFilters.push(topicResult);
+        findings.push(...topicResult.findings);
+      });
+    }
+  }
+
+  // Optional: ledger range
+  const startLedger = query.startLedger;
+  const endLedger = query.endLedger;
+
+  if (startLedger !== undefined) {
+    if (!isValidLedgerNumber(startLedger)) {
+      findings.push({
+        path: 'startLedger',
+        severity: 'error',
+        code: 'malformed-value',
+        message: 'Field "startLedger" must be a non-negative integer.',
+      });
+    } else {
+      result.query.startLedger = startLedger as number;
+      result.ledgerRange.startLedger = startLedger as number;
+    }
+  }
+
+  if (endLedger !== undefined) {
+    if (!isValidLedgerNumber(endLedger)) {
+      findings.push({
+        path: 'endLedger',
+        severity: 'error',
+        code: 'malformed-value',
+        message: 'Field "endLedger" must be a non-negative integer.',
+      });
+    } else {
+      result.query.endLedger = endLedger as number;
+      result.ledgerRange.endLedger = endLedger as number;
+    }
+  }
+
+  if (
+    result.ledgerRange.startLedger !== undefined &&
+    result.ledgerRange.endLedger !== undefined
+  ) {
+    if (result.ledgerRange.endLedger < result.ledgerRange.startLedger) {
+      result.ledgerRange.valid = false;
+      result.ledgerRange.reversed = true;
+      findings.push({
+        path: 'endLedger',
+        severity: 'error',
+        code: 'reversed-ledger-range',
+        message: `Ledger range is reversed: endLedger (${result.ledgerRange.endLedger}) is less than startLedger (${result.ledgerRange.startLedger}).`,
+      });
+    }
+  }
+
+  if (options.endpoint) {
+    result.endpointCompatibility = {
+      endpoint: options.endpoint,
+      checked: false,
+      message:
+        'Endpoint compatibility was not verified. Local schema validation does not confirm that the endpoint accepts this query or retains the requested ledger range.',
+    };
+    findings.push({
+      path: 'endpoint',
+      severity: 'info',
+      code: 'endpoint-not-checked',
+      message:
+        'Endpoint information was supplied, but only local schema validation was performed. Endpoint acceptance and historical coverage were not verified.',
+    });
+  }
+
+  return finalizeResult(result);
+}
+
+function validateTopicFilter(
+  topic: unknown,
+  index: number,
+): SorobanEventQueryTopicFilterResult {
+  const findings: SorobanEventQueryFinding[] = [];
+  const result: SorobanEventQueryTopicFilterResult = {
+    index,
+    raw: topic,
+    valid: true,
+    findings,
+  };
+
+  if (topic === null || topic === undefined) {
+    result.valid = false;
+    findings.push({
+      path: `topics[${index}]`,
+      severity: 'error',
+      code: 'malformed-topic',
+      message: `Topic filter at index ${index} must not be null.`,
+    });
+    return result;
+  }
+
+  if (Array.isArray(topic)) {
+    if (topic.length === 0) {
+      findings.push({
+        path: `topics[${index}]`,
+        severity: 'warning',
+        code: 'empty-topic-filter',
+        message: `Topic filter at index ${index} is an empty array and will match any topic at this position.`,
+      });
+      return result;
+    }
+    topic.forEach((segment, segmentIndex) => {
+      validateTopicSegment(segment, `topics[${index}][${segmentIndex}]`, findings, result);
+    });
+    return result;
+  }
+
+  if (typeof topic === 'string') {
+    validateTopicSegment(topic, `topics[${index}]`, findings, result);
+    return result;
+  }
+
+  result.valid = false;
+  findings.push({
+    path: `topics[${index}]`,
+    severity: 'error',
+    code: 'malformed-topic',
+    message: `Topic filter at index ${index} must be a string or an array of strings.`,
+  });
+  return result;
+}
+
+function validateTopicSegment(
+  segment: unknown,
+  path: string,
+  findings: SorobanEventQueryFinding[],
+  result: SorobanEventQueryTopicFilterResult,
+): void {
+  if (segment === null || segment === undefined) {
+    result.valid = false;
+    findings.push({
+      path,
+      severity: 'error',
+      code: 'malformed-topic',
+      message: 'Topic segment must not be null.',
+    });
+    return;
+  }
+
+  if (typeof segment !== 'string') {
+    result.valid = false;
+    findings.push({
+      path,
+      severity: 'error',
+      code: 'malformed-topic',
+      message: 'Topic segment must be a base64-encoded ScVal string.',
+    });
+    return;
+  }
+
+  if (segment.length === 0) {
+    findings.push({
+      path,
+      severity: 'warning',
+      code: 'empty-topic-segment',
+      message: 'Topic segment is an empty string and will match any value at this position.',
+    });
+    return;
+  }
+
+  const decoded = tryDecodeScValTopic(segment);
+  if (!decoded.valid) {
+    result.valid = false;
+    findings.push({
+      path,
+      severity: 'error',
+      code: 'malformed-scval-topic',
+      message: decoded.error,
+    });
+    return;
+  }
+
+  if (decoded.decoded !== undefined) {
+    result.decoded = decoded.decoded;
+  }
+}
+
+function tryDecodeScValTopic(segment: string): { valid: boolean; decoded?: string; error: string } {
+  const normalized = segment.replace(/\s+/g, '');
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(normalized) || normalized.length % 4 !== 0) {
+    return {
+      valid: false,
+      error: `Topic segment "${segment}" is not valid base64 and cannot be decoded as an ScVal.`,
+    };
+  }
+
+  try {
+    const buffer = Buffer.from(normalized, 'base64');
+    if (buffer.length === 0) {
+      return {
+        valid: false,
+        error: `Topic segment "${segment}" decoded to an empty ScVal payload.`,
+      };
+    }
+    return { valid: true, decoded: buffer.toString('hex'), error: '' };
+  } catch {
+    return {
+      valid: false,
+      error: `Topic segment "${segment}" could not be decoded as an ScVal.`,
+    };
+  }
+}
+
+function isValidLedgerNumber(value: unknown): boolean {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+}
+
+function finalizeResult(
+  result: SorobanEventQueryValidationResult,
+): SorobanEventQueryValidationResult {
+  const hasError = result.findings.some((finding) => finding.severity === 'error');
+  const hasWarning = result.findings.some((finding) => finding.severity === 'warning');
+
+  result.valid = !hasError;
+  if (hasError) {
+    result.status = 'invalid';
+  } else if (hasWarning) {
+    result.status = 'warning';
+  } else {
+    result.status = 'valid';
+  }
+
+  return result;
+}
+
 interface JsonRpcResponse<T> {
   jsonrpc: string;
   id: number | string;

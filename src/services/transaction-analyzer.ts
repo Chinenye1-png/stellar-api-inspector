@@ -43,6 +43,344 @@ export interface FetchTransactionOptions {
   hash: string;
 }
 
+export interface PaymentReferenceAuditOptions {
+  horizonUrl: string;
+  reference: string;
+  account?: string;
+  asset?: { code: string; issuer?: string };
+  expectedDestination?: string;
+  expectedAmount?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+}
+
+export type ReferenceType = 'transaction_hash' | 'memo_text' | 'memo_id' | 'memo_hash' | 'unknown';
+
+export interface ReferenceValidation {
+  type: ReferenceType;
+  valid: boolean;
+  error?: string;
+}
+
+export interface MatchedPaymentOperation {
+  operationIndex: number;
+  type: string;
+  sender: string;
+  destination: string;
+  assetCode: string;
+  assetIssuer: string;
+  amount: string;
+  exactAmount: boolean;
+}
+
+export interface MatchedTransaction {
+  hash: string;
+  ledger: number | null;
+  createdAt: string;
+  successful: boolean;
+  status: string;
+  memoType: string;
+  memoValue: string;
+  matchKind: 'transaction_hash' | 'memo_reference';
+  payments: MatchedPaymentOperation[];
+}
+
+export interface RetrievalLimitations {
+  incomplete: boolean;
+  paginationFailures: string[];
+  unavailableHistory: boolean;
+  notes: string[];
+}
+
+export interface PaymentReferenceAuditResult {
+  reference: string;
+  referenceType: ReferenceType;
+  validation: ReferenceValidation;
+  constraints: {
+    account?: string;
+    asset?: { code: string; issuer?: string };
+    expectedDestination?: string;
+    expectedAmount?: string;
+    since?: string;
+    until?: string;
+  };
+  matches: MatchedTransaction[];
+  ambiguous: boolean;
+  matchCount: number;
+  limitations: RetrievalLimitations;
+  readOnly: true;
+  settlementClaimed: false;
+}
+
+const MEMO_HASH_REGEX = /^[0-9a-fA-F]{64}$/;
+const MEMO_ID_REGEX = /^\d+$/;
+
+export function classifyReference(reference: string): ReferenceValidation {
+  const trimmed = reference?.trim() ?? '';
+  if (!trimmed) {
+    return { type: 'unknown', valid: false, error: 'Payment reference must not be empty.' };
+  }
+  if (MEMO_HASH_REGEX.test(trimmed)) {
+    const hashCheck = validateTransactionHash(trimmed);
+    if (hashCheck.valid) {
+      return { type: 'transaction_hash', valid: true };
+    }
+  }
+  if (MEMO_ID_REGEX.test(trimmed)) {
+    return { type: 'memo_id', valid: true };
+  }
+  return { type: 'memo_text', valid: true };
+}
+
+function normalizeAssetCode(code: string | undefined): string {
+  return (code ?? '').trim().toUpperCase();
+}
+
+function assetMatches(
+  op: Record<string, unknown>,
+  expected: { code: string; issuer?: string },
+): boolean {
+  const assetType = (op.asset_type as string) || 'native';
+  const expectedCode = normalizeAssetCode(expected.code);
+  if (expectedCode === 'XLM' || expectedCode === 'NATIVE') {
+    return assetType === 'native';
+  }
+  if (assetType === 'native') return false;
+  const code = normalizeAssetCode(op.asset_code as string | undefined);
+  if (code !== expectedCode) return false;
+  if (expected.issuer) {
+    const issuer = (op.asset_issuer as string) || '';
+    return issuer === expected.issuer;
+  }
+  return true;
+}
+
+function amountsEqual(a: string, b: string): boolean {
+  const na = Number(a);
+  const nb = Number(b);
+  if (!Number.isFinite(na) || !Number.isFinite(nb)) {
+    return a.trim() === b.trim();
+  }
+  return na === nb;
+}
+
+function withinTimeWindow(createdAt: string, since?: string, until?: string): boolean {
+  const ts = Date.parse(createdAt);
+  if (Number.isNaN(ts)) return true;
+  if (since) {
+    const sinceTs = Date.parse(since);
+    if (!Number.isNaN(sinceTs) && ts < sinceTs) return false;
+  }
+  if (until) {
+    const untilTs = Date.parse(until);
+    if (!Number.isNaN(untilTs) && ts > untilTs) return false;
+  }
+  return true;
+}
+
+function extractPaymentOperations(
+  rawOps: unknown[],
+  options: PaymentReferenceAuditOptions,
+): MatchedPaymentOperation[] {
+  const payments: MatchedPaymentOperation[] = [];
+  rawOps.forEach((raw, index) => {
+    const op = raw as Record<string, unknown>;
+    const type = normalizeOperationType((op.type as string) || 'unknown');
+    if (
+      type !== 'payment' &&
+      type !== 'path_payment_strict_receive' &&
+      type !== 'path_payment_strict_send'
+    ) {
+      return;
+    }
+
+    const sender = (op.from as string) || (op.source_account as string) || '';
+    const destination = (op.to as string) || '';
+    const amount = (op.amount as string) || '0';
+    const assetType = (op.asset_type as string) || 'native';
+    const assetCode = assetType === 'native' ? 'XLM' : (op.asset_code as string) || '';
+    const assetIssuer = assetType === 'native' ? '' : (op.asset_issuer as string) || '';
+
+    if (options.expectedDestination && destination !== options.expectedDestination) return;
+    if (options.asset && !assetMatches(op, options.asset)) return;
+    if (options.expectedAmount && !amountsEqual(amount, options.expectedAmount)) return;
+
+    payments.push({
+      operationIndex: index,
+      type,
+      sender,
+      destination,
+      assetCode,
+      assetIssuer,
+      amount,
+      exactAmount: options.expectedAmount ? amountsEqual(amount, options.expectedAmount) : true,
+    });
+  });
+  return payments;
+}
+
+function memoMatches(
+  memoType: string,
+  memoValue: string,
+  reference: string,
+  referenceType: ReferenceType,
+): boolean {
+  const value = (memoValue ?? '').trim();
+  const ref = reference.trim();
+  switch (memoType) {
+    case 'text':
+      return referenceType === 'memo_text' && value === ref;
+    case 'id':
+      return referenceType === 'memo_id' && value === ref;
+    case 'hash':
+    case 'return':
+      return referenceType === 'transaction_hash' && value.toLowerCase() === ref.toLowerCase();
+    default:
+      return false;
+  }
+}
+
+export async function auditPaymentReference(
+  options: PaymentReferenceAuditOptions,
+): Promise<PaymentReferenceAuditResult> {
+  const reference = options.reference?.trim() ?? '';
+  const validation = classifyReference(reference);
+  const limitations: RetrievalLimitations = {
+    incomplete: false,
+    paginationFailures: [],
+    unavailableHistory: false,
+    notes: [],
+  };
+
+  const constraints = {
+    account: options.account,
+    asset: options.asset,
+    expectedDestination: options.expectedDestination,
+    expectedAmount: options.expectedAmount,
+    since: options.since,
+    until: options.until,
+  };
+
+  const baseResult: PaymentReferenceAuditResult = {
+    reference,
+    referenceType: validation.type,
+    validation,
+    constraints,
+    matches: [],
+    ambiguous: false,
+    matchCount: 0,
+    limitations,
+    readOnly: true,
+    settlementClaimed: false,
+  };
+
+  if (!validation.valid) {
+    return baseResult;
+  }
+
+  const matches: MatchedTransaction[] = [];
+
+  // Exact transaction-hash lookup path.
+  if (validation.type === 'transaction_hash') {
+    try {
+      const tx = await fetchTransaction(options.horizonUrl, reference);
+      if (tx) {
+        const rawOps = await fetchOperationsForTransaction(options.horizonUrl, reference).catch(
+          (err: unknown) => {
+            limitations.paginationFailures.push(
+              `Failed to load operations for ${reference}: ${(err as Error).message}`,
+            );
+            limitations.incomplete = true;
+            return [] as unknown[];
+          },
+        );
+        const payments = extractPaymentOperations(rawOps, options);
+        if (withinTimeWindow(tx.created_at, options.since, options.until)) {
+          matches.push({
+            hash: tx.hash,
+            ledger: tx.ledger ?? null,
+            createdAt: tx.created_at,
+            successful: tx.successful,
+            status: tx.successful ? 'success' : 'failed',
+            memoType: tx.memo_type,
+            memoValue: tx.memo ?? '',
+            matchKind: 'transaction_hash',
+            payments,
+          });
+        }
+      }
+    } catch (err) {
+      limitations.unavailableHistory = true;
+      limitations.incomplete = true;
+      limitations.notes.push(
+        `Transaction ${reference} could not be retrieved: ${(err as Error).message}`,
+      );
+    }
+    const result: PaymentReferenceAuditResult = {
+      ...baseResult,
+      matches,
+      matchCount: matches.length,
+      ambiguous: false,
+    };
+    return result;
+  }
+
+  // Application-level memo/reference search path.
+  if (!options.account) {
+    limitations.incomplete = true;
+    limitations.notes.push(
+      'Memo-based reference search requires an account filter; no account was supplied so no records were searched.',
+    );
+    return baseResult;
+  }
+
+  try {
+    const { fetchAccountTransactions } = await import('./horizon-client');
+    const records = await fetchAccountTransactions(options.horizonUrl, options.account, {
+      limit: options.limit ?? 200,
+    });
+    for (const tx of records) {
+      if (!withinTimeWindow(tx.created_at, options.since, options.until)) continue;
+      if (!memoMatches(tx.memo_type, tx.memo ?? '', reference, validation.type)) continue;
+      const rawOps = await fetchOperationsForTransaction(options.horizonUrl, tx.hash).catch(
+        (err: unknown) => {
+          limitations.paginationFailures.push(
+            `Failed to load operations for ${tx.hash}: ${(err as Error).message}`,
+          );
+          limitations.incomplete = true;
+          return [] as unknown[];
+        },
+      );
+      const payments = extractPaymentOperations(rawOps, options);
+      matches.push({
+        hash: tx.hash,
+        ledger: tx.ledger ?? null,
+        createdAt: tx.created_at,
+        successful: tx.successful,
+        status: tx.successful ? 'success' : 'failed',
+        memoType: tx.memo_type,
+        memoValue: tx.memo ?? '',
+        matchKind: 'memo_reference',
+        payments,
+      });
+    }
+  } catch (err) {
+    limitations.unavailableHistory = true;
+    limitations.incomplete = true;
+    limitations.notes.push(
+      `Account transaction history could not be retrieved: ${(err as Error).message}`,
+    );
+  }
+
+  return {
+    ...baseResult,
+    matches,
+    matchCount: matches.length,
+    ambiguous: matches.length > 1,
+  };
+}
+
 const TX_HASH_REGEX = /^[0-9a-fA-F]{64}$/;
 
 export function validateTransactionHash(hash: string): { valid: boolean; error?: string } {
@@ -711,3 +1049,5 @@ export async function analyzeTransaction(
 
   return { transaction, operations, assetSummary };
 }
+
+export { analyzeOperation, formatAsset };

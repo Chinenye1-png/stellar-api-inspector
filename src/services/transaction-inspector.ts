@@ -199,6 +199,102 @@ export interface SorobanTxResult {
 }
 
 // ---------------------------------------------------------------------------
+// Memo decoding utilities (shared with the memo privacy audit)
+// ---------------------------------------------------------------------------
+
+/** Stellar memo types as they appear in transaction records. */
+export type MemoType = 'none' | 'text' | 'id' | 'hash' | 'return';
+
+/** A decoded Stellar transaction memo. */
+export interface DecodedMemo {
+  /** Normalised memo type. */
+  type: MemoType;
+  /**
+   * Decoded memo value.
+   * - `text`: the UTF-8 string
+   * - `id`: the numeric identifier as a string
+   * - `hash` / `return`: the 32-byte hash as a lower-case hex string
+   * - `none`: undefined
+   */
+  value?: string;
+  /** Byte length of the memo value (0 for `none`). */
+  byteLength: number;
+}
+
+/**
+ * Normalise a raw memo type string (as returned by Horizon or an envelope
+ * record) into a {@link MemoType}. Unknown values map to `none`.
+ */
+export function normaliseMemoType(raw: string | undefined | null): MemoType {
+  switch ((raw ?? '').trim().toLowerCase()) {
+    case 'text':
+    case 'memo_text':
+      return 'text';
+    case 'id':
+    case 'memo_id':
+      return 'id';
+    case 'hash':
+    case 'memo_hash':
+      return 'hash';
+    case 'return':
+    case 'return_hash':
+    case 'memo_return':
+      return 'return';
+    default:
+      return 'none';
+  }
+}
+
+/**
+ * Decode a memo from a transaction envelope or transaction record.
+ *
+ * Accepts either a Horizon-style record (`{ memo_type, memo }`) or an
+ * envelope-style object (`{ memo: { type, value } }`). Read-only: the input is
+ * never mutated.
+ */
+export function decodeMemo(input: unknown): DecodedMemo {
+  if (!input || typeof input !== 'object') {
+    return { type: 'none', byteLength: 0 };
+  }
+
+  const record = input as Record<string, unknown>;
+
+  // Envelope-style: { memo: { type, value } }
+  const nested = record.memo;
+  if (nested && typeof nested === 'object') {
+    const m = nested as Record<string, unknown>;
+    const type = normaliseMemoType(typeof m.type === 'string' ? m.type : undefined);
+    return buildDecodedMemo(type, m.value);
+  }
+
+  // Horizon-style: { memo_type, memo }
+  const type = normaliseMemoType(
+    typeof record.memo_type === 'string' ? record.memo_type : undefined,
+  );
+  return buildDecodedMemo(type, record.memo);
+}
+
+function buildDecodedMemo(type: MemoType, rawValue: unknown): DecodedMemo {
+  if (type === 'none' || rawValue === undefined || rawValue === null) {
+    return { type: 'none', byteLength: 0 };
+  }
+
+  if (type === 'id') {
+    const value = String(rawValue);
+    return { type, value, byteLength: Buffer.byteLength(value, 'utf8') };
+  }
+
+  if (type === 'hash' || type === 'return') {
+    const value = String(rawValue).toLowerCase();
+    return { type, value, byteLength: value.length / 2 };
+  }
+
+  // text
+  const value = String(rawValue);
+  return { type, value, byteLength: Buffer.byteLength(value, 'utf8') };
+}
+
+// ---------------------------------------------------------------------------
 // Hash validation
 // ---------------------------------------------------------------------------
 

@@ -11,14 +11,18 @@ export type InteractiveAction =
   | 'horizon'
   | 'soroban'
   | 'account'
+  | 'account-snapshot-audit'
   | 'health'
   | 'ledger'
   | 'asset'
   | 'fees'
   | 'decode'
   | 'operations'
+  | 'payment-reference-audit'
   | 'contract'
   | 'soroban-tx'
+  | 'soroban-event-query'
+  | 'memo-privacy-audit'
   | 'trades'
   | 'sponsorship'
   | 'network-compat'
@@ -77,14 +81,18 @@ export async function collectInteractiveCommand(
         { name: 'Inspect Horizon Endpoint', value: 'horizon' },
         { name: 'Inspect Soroban Endpoint', value: 'soroban' },
         { name: 'Audit Account', value: 'account' },
+        { name: 'Account Snapshot Consistency Audit', value: 'account-snapshot-audit' },
         { name: 'Multi-Endpoint Health Dashboard', value: 'health' },
         { name: 'Inspect Ledger Header', value: 'ledger' },
         { name: 'Inspect Asset', value: 'asset' },
         { name: 'Network Fee Statistics', value: 'fees' },
         { name: 'Decode Transaction XDR', value: 'decode' },
         { name: 'Operations History', value: 'operations' },
+        { name: 'Payment Reference Audit', value: 'payment-reference-audit' },
         { name: 'Inspect Soroban Contract', value: 'contract' },
         { name: 'Inspect Soroban Transaction', value: 'soroban-tx' },
+        { name: 'Validate Soroban Event Query', value: 'soroban-event-query' },
+        { name: 'Transaction Memo Privacy Audit', value: 'memo-privacy-audit' },
         { name: 'Market Trade History', value: 'trades' },
         { name: 'Sponsorship Lifecycle Audit', value: 'sponsorship' },
         { name: 'Network Fee & Protocol Compatibility Audit', value: 'network-compat' },
@@ -102,6 +110,8 @@ export async function collectInteractiveCommand(
       return collectSorobanCommand(inquirer);
     case 'account':
       return collectAccountCommand(inquirer);
+    case 'account-snapshot-audit':
+      return collectAccountSnapshotAuditCommand(inquirer);
     case 'health':
       return collectHealthCommand(inquirer);
     case 'ledger':
@@ -114,10 +124,16 @@ export async function collectInteractiveCommand(
       return collectDecodeCommand(inquirer);
     case 'operations':
       return collectOperationsCommand(inquirer);
+    case 'payment-reference-audit':
+      return collectPaymentReferenceAuditCommand(inquirer);
     case 'contract':
       return collectContractCommand(inquirer);
     case 'soroban-tx':
       return collectSorobanTxCommand(inquirer);
+    case 'soroban-event-query':
+      return collectSorobanEventQueryCommand(inquirer);
+    case 'memo-privacy-audit':
+      return collectMemoPrivacyAuditCommand(inquirer);
     case 'trades':
       return collectTradesCommand(inquirer);
     case 'sponsorship':
@@ -190,6 +206,39 @@ async function collectAccountCommand(inquirer: PromptModule): Promise<Interactiv
     command: 'account',
     args: [answers.accountId, '--horizon', answers.horizon],
     summary: `stellar-api-inspector account ${answers.accountId} --horizon ${answers.horizon}`,
+  };
+}
+
+async function collectAccountSnapshotAuditCommand(
+  inquirer: PromptModule,
+): Promise<InteractiveCommand> {
+  const answers = await inquirer.prompt<{ snapshots: string; horizon: string }>([
+    {
+      type: 'input',
+      name: 'snapshots',
+      message: 'Account snapshot files or responses, comma-separated',
+      validate: (value: string) => {
+        const snapshots = splitCsv(value);
+        if (snapshots.length < 2) return 'At least two snapshots are required';
+        return true;
+      },
+    },
+    {
+      type: 'input',
+      name: 'horizon',
+      message: 'Optional Horizon endpoint URL',
+      validate: (value: string) => value.trim() === '' || validateUrl(value),
+    },
+  ]);
+
+  const snapshots = splitCsv(answers.snapshots);
+  const args = [...snapshots];
+  if (answers.horizon.trim()) args.push('--horizon', answers.horizon.trim());
+
+  return {
+    command: 'account-snapshot-audit',
+    args,
+    summary: `stellar-api-inspector account-snapshot-audit ${snapshots.join(' ')}`,
   };
 }
 
@@ -281,6 +330,66 @@ async function collectOperationsCommand(inquirer: PromptModule): Promise<Interac
     command: 'operations',
     args,
     summary: `stellar-api-inspector operations ${args.join(' ')}`,
+  };
+}
+
+async function collectPaymentReferenceAuditCommand(
+  inquirer: PromptModule,
+): Promise<InteractiveCommand> {
+  const answers = await inquirer.prompt<{
+    reference: string;
+    horizon: string;
+    account: string;
+    asset: string;
+    amount: string;
+    since: string;
+  }>([
+    {
+      type: 'input',
+      name: 'reference',
+      message: 'Transaction hash or application-level payment reference',
+      validate: validateNonEmpty,
+    },
+    {
+      type: 'input',
+      name: 'horizon',
+      message: 'Horizon endpoint URL',
+      default: 'https://horizon-testnet.stellar.org',
+      validate: validateUrl,
+    },
+    {
+      type: 'input',
+      name: 'account',
+      message: 'Optional account filter',
+      validate: (value: string) => value.trim() === '' || validateAccountId(value),
+    },
+    {
+      type: 'input',
+      name: 'asset',
+      message: 'Optional expected asset (e.g. XLM or CODE:ISSUER)',
+    },
+    {
+      type: 'input',
+      name: 'amount',
+      message: 'Optional expected amount',
+    },
+    {
+      type: 'input',
+      name: 'since',
+      message: 'Optional time window start (ISO 8601)',
+    },
+  ]);
+
+  const args = [answers.reference.trim(), '--horizon', answers.horizon];
+  if (answers.account.trim()) args.push('--account', answers.account.trim());
+  if (answers.asset.trim()) args.push('--asset', answers.asset.trim());
+  if (answers.amount.trim()) args.push('--amount', answers.amount.trim());
+  if (answers.since.trim()) args.push('--since', answers.since.trim());
+
+  return {
+    command: 'payment-reference-audit',
+    args,
+    summary: `stellar-api-inspector payment-reference-audit ${answers.reference.trim()} --horizon ${answers.horizon}`,
   };
 }
 
@@ -421,6 +530,84 @@ async function collectSorobanTxCommand(inquirer: PromptModule): Promise<Interact
     command: 'soroban-tx',
     args: [answers.hash.trim(), '--rpc', answers.rpc],
     summary: `stellar-api-inspector soroban-tx ${answers.hash.trim()} --rpc ${answers.rpc}`,
+  };
+}
+
+async function collectSorobanEventQueryCommand(
+  inquirer: PromptModule,
+): Promise<InteractiveCommand> {
+  const answers = await inquirer.prompt<{ query: string; rpc: string }>([
+    {
+      type: 'input',
+      name: 'query',
+      message: 'Saved event query configuration file (JSON)',
+      validate: validateNonEmpty,
+    },
+    {
+      type: 'input',
+      name: 'rpc',
+      message: 'Optional Soroban RPC URL for endpoint compatibility checks',
+      validate: (value: string) => value.trim() === '' || validateSorobanRpcUrl(value),
+    },
+  ]);
+
+  const args = [answers.query.trim()];
+  if (answers.rpc.trim()) args.push('--rpc', answers.rpc.trim());
+
+  return {
+    command: 'soroban-event-query',
+    args,
+    summary: `stellar-api-inspector soroban-event-query ${answers.query.trim()}`,
+  };
+}
+
+async function collectMemoPrivacyAuditCommand(
+  inquirer: PromptModule,
+): Promise<InteractiveCommand> {
+  const answers = await inquirer.prompt<{
+    transaction: string;
+    network: string;
+    rules: string;
+    showMemo: string;
+  }>([
+    {
+      type: 'input',
+      name: 'transaction',
+      message: 'Transaction envelope XDR or transaction record file',
+      validate: validateNonEmpty,
+    },
+    {
+      type: 'input',
+      name: 'network',
+      message: 'Network passphrase or alias',
+      default: 'testnet',
+    },
+    {
+      type: 'input',
+      name: 'rules',
+      message: 'Optional custom privacy rules file (JSON)',
+    },
+    {
+      type: 'input',
+      name: 'showMemo',
+      message: 'Display decoded memo contents? (yes/no)',
+      default: 'no',
+      validate: (value: string) =>
+        ['yes', 'no', 'y', 'n', ''].includes(value.trim().toLowerCase()) ||
+        'Enter yes or no',
+    },
+  ]);
+
+  const args = [answers.transaction.trim(), '--network', answers.network];
+  if (answers.rules.trim()) args.push('--rules', answers.rules.trim());
+  if (['yes', 'y'].includes(answers.showMemo.trim().toLowerCase())) {
+    args.push('--show-memo');
+  }
+
+  return {
+    command: 'memo-privacy-audit',
+    args,
+    summary: `stellar-api-inspector memo-privacy-audit <transaction> --network ${answers.network}`,
   };
 }
 
